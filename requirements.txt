@@ -1,0 +1,32 @@
+# Core LLM & NLP
+langchain>=0.1.0
+langgraph>=0.0.1
+langchain-core>=0.1.0
+langchain-community>=0.0.1
+langchain-text-splitters>=0.0.1
+
+# Vector Databases (Choose one)
+weaviate-client>=3.0.0
+pymilvus>=2.3.0
+pinecone-client>=2.2.0
+
+# SQL & Database
+sqlalchemy>=2.0.0
+
+# Embeddings & Text Processing
+sentence-transformers>=2.2.0
+numpy>=1.24.0
+
+# Data & Evaluation
+pandas>=2.0.0
+scikit-learn>=1.3.0
+
+# Configuration & Utilities
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+
+# LLM Providers (Optional - choose based on your .env LLM_PROVIDER)
+ollama>=0.1.0
+langchain-openai>=0.1.0
+langchain-google-genai>=0.0.1
+langchain-anthropic>=0.1.0
