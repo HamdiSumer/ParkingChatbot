@@ -88,7 +88,7 @@ uv run python main.py
 ---
 
 ## Architecture
-![Architecture Diagram](docs/architecture-diagram.svg)
+![Architecture Diagram](docs/architecture_diagram.svg)
 
 ---
 
