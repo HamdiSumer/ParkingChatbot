@@ -62,16 +62,52 @@ def create_weaviate_connection(embeddings=None):
         if not client.is_ready():
             raise ConnectionError(f"Weaviate not ready at {weaviate_url}")
 
-        # Create vector store using LangChain
+        # Create schema if it doesn't exist (with no vectorizer, use custom embeddings)
+        try:
+            schema = client.schema.get()
+            # Check if our index exists
+            class_exists = any(c.get("class") == config.WEAVIATE_INDEX_NAME for c in schema.get("classes", []))
+
+            if not class_exists:
+                # Create class with 'none' vectorizer (we provide vectors locally)
+                class_obj = {
+                    "class": config.WEAVIATE_INDEX_NAME,
+                    "vectorizer": "none",  # Use custom vectors
+                    "vectorIndexConfig": {
+                        "size": 384  # Dimension of our embeddings
+                    },
+                    "properties": [
+                        {
+                            "name": "text",
+                            "dataType": ["text"]
+                        },
+                        {
+                            "name": "metadata_source",
+                            "dataType": ["text"]
+                        },
+                        {
+                            "name": "metadata_page",
+                            "dataType": ["int"]
+                        }
+                    ]
+                }
+                client.schema.create_class(class_obj)
+                logger.info(f"Created Weaviate class: {config.WEAVIATE_INDEX_NAME}")
+        except Exception as e:
+            logger.warning(f"Could not create schema: {e}")
+
+        # Create vector store using LangChain with custom embeddings
         vector_store = Weaviate(
             client=client,
             index_name=config.WEAVIATE_INDEX_NAME,
             text_key="text",
             embedding=embeddings,
+            by_text=False,  # Use vector search, not text search
         )
 
         logger.info(f"✓ Connected to Weaviate: {weaviate_url}")
         logger.info(f"✓ Index: {config.WEAVIATE_INDEX_NAME}")
+        logger.info(f"✓ Using custom embeddings (no remote vectorization)")
         return vector_store
     except Exception as e:
         logger.error(f"Failed to connect to Weaviate: {e}")

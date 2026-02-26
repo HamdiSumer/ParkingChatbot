@@ -53,14 +53,14 @@ def main():
 
     # Initialize application
     try:
-        app = create_app(skip_milvus=False)
+        app = create_app(skip_vector_db=False)
         app.ingest_sample_data()
     except Exception as e:
         logger.error(f"Failed to initialize application: {e}")
         print(f"Error: Failed to initialize chatbot: {e}")
         print("Trying to continue with limited functionality...")
         try:
-            app = create_app(skip_milvus=True)
+            app = create_app(skip_vector_db=True)
         except Exception as e2:
             print(f"Fatal error: {e2}")
             sys.exit(1)

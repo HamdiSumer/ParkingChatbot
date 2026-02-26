@@ -3,29 +3,29 @@ from src.config import get_config
 from src.utils.logging import logger, setup_logging
 from src.rag.embeddings import create_embeddings
 from src.rag.retriever import ParkingRAGRetriever
-from src.database.milvus_db import create_milvus_connection, ingest_static_data
+from src.rag.sql_agent import create_sql_agent
+from src.database.weaviate_db import create_weaviate_connection
 from src.database.sql_db import ParkingDatabase
 from src.agents.workflow import ParkingChatbotWorkflow
 from src.guardrails.filter import DataProtectionFilter
 from src.evaluation.test_data import get_sample_parking_documents
-from langchain_core.documents import Document
 from typing import Optional
 
 
 class ParkingChatbotApp:
     """Main application class for the parking chatbot."""
 
-    def __init__(self, skip_milvus: bool = False):
+    def __init__(self, skip_vector_db: bool = False):
         """Initialize the parking chatbot application.
 
         Args:
-            skip_milvus: If True, skip Milvus initialization (useful for testing without Milvus).
+            skip_vector_db: If True, skip Weaviate initialization (useful for testing without vector DB).
         """
         setup_logging()
         logger.info("Initializing Parking Chatbot Application...")
 
         self.config = get_config()
-        self.skip_milvus = skip_milvus
+        self.skip_vector_db = skip_vector_db
 
         # Initialize components
         self.embeddings = create_embeddings()
@@ -35,29 +35,35 @@ class ParkingChatbotApp:
         self.db = ParkingDatabase()
         logger.info("✓ SQL Database initialized")
 
-        # Initialize Vector Database (Weaviate, Pinecone, or Milvus)
+        # Initialize Vector Database (Weaviate only)
         self.vector_store = None
-        if not skip_milvus:
+        if not self.skip_vector_db:
             try:
-                provider = self.config.VECTOR_DB_PROVIDER
-                if provider == "weaviate":
-                    from src.database.weaviate_db import create_weaviate_connection
-                    self.vector_store = create_weaviate_connection(self.embeddings)
-                    logger.info("✓ Weaviate Vector Database initialized")
-                elif provider == "pinecone":
-                    from src.database.pinecone_db import create_pinecone_connection
-                    self.vector_store = create_pinecone_connection(self.embeddings)
-                    logger.info("✓ Pinecone Vector Database initialized")
-                else:  # milvus
-                    self.vector_store = create_milvus_connection(self.embeddings)
-                    logger.info("✓ Milvus Vector Database initialized")
+                self.vector_store = create_weaviate_connection(self.embeddings)
+                logger.info("✓ Weaviate Vector Database initialized")
             except Exception as e:
                 logger.warning(f"Vector DB initialization failed: {e}. Continuing without vector DB.")
 
-        # Initialize RAG retriever
+        # Initialize SQL Agent for hybrid retrieval
+        self.sql_agent = None
+        if self.db:
+            try:
+                self.sql_agent = create_sql_agent(self.db)
+                if self.sql_agent:
+                    logger.info("✓ SQL Agent initialized for hybrid retrieval")
+                else:
+                    logger.warning("SQL Agent initialization failed")
+            except Exception as e:
+                logger.warning(f"Could not initialize SQL Agent: {e}")
+
+        # Initialize RAG retriever with hybrid retrieval (Vector DB + SQL Agent)
         if self.vector_store:
-            self.rag_retriever = ParkingRAGRetriever(self.vector_store)
-            logger.info("✓ RAG Retriever initialized")
+            self.rag_retriever = ParkingRAGRetriever(
+                self.vector_store,
+                db=self.db,
+                sql_agent=self.sql_agent
+            )
+            logger.info("✓ RAG Retriever initialized with hybrid retrieval (Vector DB + SQL Agent)")
         else:
             self.rag_retriever = None
             logger.warning("RAG Retriever skipped (no vector store)")
@@ -205,13 +211,13 @@ class ParkingChatbotApp:
         logger.info("Application shutdown complete")
 
 
-def create_app(skip_milvus: bool = False) -> ParkingChatbotApp:
+def create_app(skip_vector_db: bool = False) -> ParkingChatbotApp:
     """Factory function to create the application.
 
     Args:
-        skip_milvus: If True, skip Milvus initialization.
+        skip_vector_db: If True, skip Weaviate initialization.
 
     Returns:
         ParkingChatbotApp instance.
     """
-    return ParkingChatbotApp(skip_milvus=skip_milvus)
+    return ParkingChatbotApp(skip_vector_db=skip_vector_db)

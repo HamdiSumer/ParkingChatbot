@@ -16,6 +16,7 @@ class DataProtectionFilter:
         "password": r"(?i)(password|pwd|pass)\s*[:=]\s*\S+",
         "api_key": r"(?i)(api[_-]?key|apikey|secret[_-]?key)\s*[:=]\s*\S+",
         "ipv4": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+        "sql_injection": r"(?i)\s*('|\")\s*(OR|AND|1|0)\s*('|\")\s*=",  # ' OR '1'='1, ' OR '='  type patterns
     }
 
     # Suspicious keywords that might indicate malicious intent
