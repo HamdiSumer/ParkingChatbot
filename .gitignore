@@ -81,6 +81,4 @@ tmp/
 temp/
 
 # Project-specific
-reports/
 *.md.backup
-ARCHITECTURE.md

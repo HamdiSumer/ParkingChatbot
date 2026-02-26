@@ -178,10 +178,89 @@ class DataProtectionFilter:
             filtered,
         )
 
+        # Mask SSN
+        filtered = re.sub(
+            self.SENSITIVE_PATTERNS["ssn"],
+            "[SSN_MASKED]",
+            filtered,
+        )
+
+        # Mask API keys and passwords
+        filtered = re.sub(
+            self.SENSITIVE_PATTERNS["api_key"],
+            "[API_KEY_MASKED]",
+            filtered,
+        )
+        filtered = re.sub(
+            self.SENSITIVE_PATTERNS["password"],
+            "[PASSWORD_MASKED]",
+            filtered,
+        )
+
         if filtered != response:
             logger.info("Response filtered for sensitive data")
 
         return filtered
+
+    def filter_output(self, response: str) -> Tuple[str, bool]:
+        """Comprehensive output filtering for LLM responses.
+
+        Combines PII filtering with checks for:
+        - Internal system information leakage
+        - Potential hallucinated credentials
+        - Database schema/query information
+        - File path exposure
+
+        Args:
+            response: LLM response to filter.
+
+        Returns:
+            Tuple of (filtered_response, was_modified).
+        """
+        original = response
+        filtered = self.filter_response(response)
+
+        # Additional output-specific patterns
+        output_patterns = {
+            # File paths that might reveal system structure
+            "file_path": (r"(?:/[a-zA-Z0-9_.-]+){3,}", "[PATH_MASKED]"),
+            # SQL table/column references that shouldn't be exposed
+            "sql_internal": (r"(?i)\b(SELECT|FROM|WHERE|JOIN)\s+[a-z_]+\s+(FROM|WHERE|ON|=)", "[QUERY_MASKED]"),
+            # Environment variable patterns
+            "env_var": (r"(?i)(DB_|API_|SECRET_|PASSWORD_|KEY_)[A-Z_]+=\S+", "[ENV_MASKED]"),
+            # Connection strings
+            "conn_string": (r"(?i)(mysql|postgres|mongodb|redis)://[^\s]+", "[CONN_MASKED]"),
+            # Internal error messages with stack traces
+            "stack_trace": (r"(?:Traceback|File \"|at \w+\.\w+\()", "[ERROR_MASKED]"),
+        }
+
+        for pattern_name, (pattern, replacement) in output_patterns.items():
+            if re.search(pattern, filtered):
+                filtered = re.sub(pattern, replacement, filtered)
+                logger.warning(f"Output contained {pattern_name}, masked")
+
+        # Check for potential jailbreak responses
+        jailbreak_indicators = [
+            "ignore previous instructions",
+            "disregard all prior",
+            "bypass security",
+            "here is the database schema",
+            "admin credentials",
+            "root password",
+        ]
+
+        response_lower = filtered.lower()
+        for indicator in jailbreak_indicators:
+            if indicator in response_lower:
+                logger.warning(f"Potential jailbreak response detected: {indicator}")
+                filtered = "I cannot provide that information. How can I help you with parking-related questions?"
+                break
+
+        was_modified = filtered != original
+        if was_modified:
+            logger.info("Output filtering applied to response")
+
+        return filtered, was_modified
 
 
 class PIIDetector:

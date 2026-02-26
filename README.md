@@ -78,11 +78,13 @@ uv run python main.py
 
 ## Features
 
-- 🚗 **Parking Information** - RAG-based document retrieval
+- 🤖 **Intelligent ReAct Agent** - LLM decides what tools to use (no retrieval for greetings!)
+- 🚗 **Parking Information** - RAG-based document retrieval (vector search)
+- 📊 **Hybrid Retrieval** - Vector DB (static) + SQL Agent (real-time data)
 - 📋 **Reservations** - Interactive multi-step booking workflow
 - 👤 **Human-in-the-Loop** - Admin approval system
 - 🔒 **Security** - PII detection and sensitive data filtering
-- 📊 **Evaluation** - Comprehensive RAG metrics (RAGAS framework)
+- 📈 **Evaluation** - Comprehensive RAG metrics (RAGAS framework) + auto-reports
 - 🔄 **Flexible LLMs** - Ollama, OpenAI, Gemini, or Claude
 
 ---
@@ -92,21 +94,41 @@ uv run python main.py
 
 ---
 
+## Intelligent Agent Routing
+
+The chatbot uses a **ReAct (Reasoning and Acting) agent** that intelligently decides what tools to use:
+
+| User Input | Agent Decision | What Happens |
+|------------|----------------|--------------|
+| "Hey" / "Thanks" | `direct_response` | No retrieval, just responds |
+| "Where is downtown parking?" | `vector_search` | Searches static knowledge base |
+| "How many spaces available?" | `sql_query` | Queries real-time database |
+| "I want to book parking" | `start_reservation` | Starts booking workflow |
+
+This means greetings don't trigger expensive RAG retrieval, and real-time queries use the SQL agent instead of outdated vector data.
+
+---
+
 ## Testing
 
 Run comprehensive tests including RAGAS metrics, retrieval quality, and end-to-end workflows:
 
 ```bash
-uv run python test_rag.py
+uv run python test_rag.py              # Run tests + generate markdown report
+uv run python test_rag.py --no-report  # Run tests without report
 ```
 
 Tests included:
 - Guardrails (security & sensitive data detection)
 - RAG Metrics (faithfulness, relevance, context precision)
 - Recall@K (retrieval ranking quality)
+- Hybrid Retrieval (SQL Agent + Vector DB)
 - Component initialization (embeddings, vector DB, LLM)
 - End-to-end workflow
 - Data architecture verification
+
+**Reports** are auto-saved to `reports/` folder as:
+`{provider}_{model}_test_results_{timestamp}.md`
 
 ---
 
@@ -115,15 +137,20 @@ Tests included:
 
 ```
 src/
-├── rag/              # RAG pipeline, embeddings, LLM providers
+├── rag/              # RAG pipeline, embeddings, LLM providers, SQL agent
 ├── database/         # Weaviate & SQLite storage
-├── agents/           # LangGraph workflow automation
+├── agents/           # LangGraph ReAct agent workflow
+│   ├── workflow.py   # Agent-based routing (vector/sql/direct)
+│   ├── state.py      # Conversation state + agent tracking
+│   ├── tools.py      # Tool definitions (VectorSearch, SQLQuery)
+│   └── prompts.py    # Agent decision prompts
 ├── guardrails/       # Security, PII detection, data filtering
 ├── evaluation/       # Metrics and evaluation components
 ├── app.py           # Main application logic
 └── cli.py           # Interactive command-line interface
 
-test_rag.py          # Comprehensive test suite
+test_rag.py          # Comprehensive test suite + report generation
+reports/             # Auto-generated test reports (markdown)
 main.py              # Entry point
 ```
 

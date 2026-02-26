@@ -275,3 +275,11 @@ class ParkingDatabase:
             return False
         finally:
             session.close()
+
+    def close(self):
+        """Close database connection and dispose engine."""
+        try:
+            self.engine.dispose()
+            logger.info("Database connection closed")
+        except Exception as e:
+            logger.error(f"Error closing database: {e}")

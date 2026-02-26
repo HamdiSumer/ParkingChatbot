@@ -4,6 +4,7 @@ from src.utils.logging import logger, setup_logging
 from src.rag.embeddings import create_embeddings
 from src.rag.retriever import ParkingRAGRetriever
 from src.rag.sql_agent import create_sql_agent
+from src.rag.llm_provider import create_llm
 from src.database.weaviate_db import create_weaviate_connection
 from src.database.sql_db import ParkingDatabase
 from src.agents.workflow import ParkingChatbotWorkflow
@@ -31,6 +32,10 @@ class ParkingChatbotApp:
         self.embeddings = create_embeddings()
         logger.info("✓ Embeddings initialized")
 
+        # Initialize shared LLM (used by RAG retriever and SQL agent)
+        self.llm = create_llm(temperature=0.3)
+        logger.info("✓ LLM initialized (shared instance)")
+
         # Initialize databases
         self.db = ParkingDatabase()
         logger.info("✓ SQL Database initialized")
@@ -44,11 +49,11 @@ class ParkingChatbotApp:
             except Exception as e:
                 logger.warning(f"Vector DB initialization failed: {e}. Continuing without vector DB.")
 
-        # Initialize SQL Agent for hybrid retrieval
+        # Initialize SQL Agent for hybrid retrieval (reusing shared LLM)
         self.sql_agent = None
         if self.db:
             try:
-                self.sql_agent = create_sql_agent(self.db)
+                self.sql_agent = create_sql_agent(self.db, llm=self.llm)
                 if self.sql_agent:
                     logger.info("✓ SQL Agent initialized for hybrid retrieval")
                 else:
@@ -60,6 +65,7 @@ class ParkingChatbotApp:
         if self.vector_store:
             self.rag_retriever = ParkingRAGRetriever(
                 self.vector_store,
+                llm=self.llm,  # Reuse shared LLM
                 db=self.db,
                 sql_agent=self.sql_agent
             )
@@ -72,12 +78,13 @@ class ParkingChatbotApp:
         self.guard_rails = DataProtectionFilter()
         logger.info("✓ Guard Rails initialized")
 
-        # Initialize workflow
+        # Initialize workflow with ReAct agent
         if self.rag_retriever:
             self.workflow = ParkingChatbotWorkflow(
-                self.rag_retriever, self.db, self.guard_rails
+                self.rag_retriever, self.db, self.guard_rails,
+                sql_agent=self.sql_agent  # Pass SQL agent for intelligent tool selection
             )
-            logger.info("✓ Chatbot Workflow initialized")
+            logger.info("✓ Chatbot Workflow initialized with ReAct agent")
         else:
             self.workflow = None
             logger.warning("Chatbot Workflow skipped (no RAG retriever)")
@@ -206,8 +213,10 @@ class ParkingChatbotApp:
     def shutdown(self):
         """Cleanup and shutdown the application."""
         logger.info("Shutting down application...")
+        if self.sql_agent and hasattr(self.sql_agent, 'close'):
+            self.sql_agent.close()
         if self.db:
-            logger.info("Database closed")
+            self.db.close()
         logger.info("Application shutdown complete")
 
 

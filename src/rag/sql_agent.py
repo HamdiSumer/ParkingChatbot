@@ -1,12 +1,12 @@
 """SQL Agent for hybrid retrieval - intelligently queries the SQL database."""
-from typing import Any
+from typing import Any, Optional
 from src.utils.logging import logger
 from src.rag.llm_provider import create_llm
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 
-def create_sql_agent(db):
+def create_sql_agent(db, llm: Optional[Any] = None):
     """Create a SQL agent that can inspect schema and execute queries.
 
     Uses a chain-based approach (works with any LLM including Ollama):
@@ -17,6 +17,7 @@ def create_sql_agent(db):
 
     Args:
         db: ParkingDatabase instance (SQLite).
+        llm: Optional LLM instance to reuse. If None, creates a new one.
 
     Returns:
         SQL agent executor that can be invoked with user questions.
@@ -37,8 +38,12 @@ def create_sql_agent(db):
         logger.info("SQL Database schema loaded")
         logger.info(f"Available tables: {sql_db.get_usable_table_names()}")
 
-        # Get the LLM
-        llm = create_llm(temperature=0.0)  # 0 temperature for precise SQL
+        # Use provided LLM or create new one
+        if llm is None:
+            llm = create_llm(temperature=0.0)  # 0 temperature for precise SQL
+            logger.info("Created new LLM for SQL Agent")
+        else:
+            logger.info("Reusing provided LLM for SQL Agent")
 
         # Create a simple wrapper for the SQL agent
         class SQLAgentExecutor:
@@ -136,6 +141,15 @@ Now generate your SQL query:""",
                 except Exception as e:
                     logger.error(f"SQL Agent error: {e}")
                     return {"output": ""}
+
+            def close(self):
+                """Close the SQL database connection."""
+                try:
+                    if hasattr(self.sql_db, '_engine'):
+                        self.sql_db._engine.dispose()
+                        logger.info("SQL Agent database connection closed")
+                except Exception as e:
+                    logger.error(f"Error closing SQL Agent connection: {e}")
 
         return SQLAgentExecutor(sql_db, llm, db_schema)
 

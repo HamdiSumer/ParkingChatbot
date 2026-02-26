@@ -1,4 +1,7 @@
 """LLM provider factory supporting multiple LLM backends."""
+import warnings
+warnings.filterwarnings('ignore')
+
 from typing import Any
 from src.config import get_config
 from src.utils.logging import logger

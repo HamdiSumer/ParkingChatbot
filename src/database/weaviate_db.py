@@ -1,4 +1,7 @@
 """Weaviate vector database integration for static parking data."""
+import warnings
+warnings.filterwarnings('ignore')
+
 from typing import List
 from langchain_community.vectorstores import Weaviate
 from langchain_core.documents import Document

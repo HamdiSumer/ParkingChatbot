@@ -1,8 +1,30 @@
 """Command-line interface for the parking chatbot."""
+# Suppress all output BEFORE importing anything
+import os
 import sys
+import io
+import warnings
+
+os.environ['TQDM_DISABLE'] = '1'
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+os.environ['MLX_DISABLE_PROGRESS_BAR'] = '1'
+warnings.filterwarnings('ignore')
+
+# Redirect stderr during imports to suppress library warnings
+_stderr = sys.stderr
+sys.stderr = io.StringIO()
+
+from src.utils.logging import set_quiet_mode, suppress_warnings
+set_quiet_mode(True)
+suppress_warnings()
+
 from src.app import create_app
 from src.evaluation.runner import EvaluationRunner
-from src.utils.logging import logger
+
+# Restore stderr after imports
+sys.stderr = _stderr
 
 
 def print_welcome():
@@ -51,19 +73,27 @@ def main():
     """Main CLI loop."""
     print_welcome()
 
-    # Initialize application
+    # Initialize application (suppress library warnings during init)
+    print("Initializing chatbot...")
+
+    _stderr = sys.stderr
+    sys.stderr = io.StringIO()
     try:
         app = create_app(skip_vector_db=False)
         app.ingest_sample_data()
     except Exception as e:
-        logger.error(f"Failed to initialize application: {e}")
-        print(f"Error: Failed to initialize chatbot: {e}")
+        sys.stderr = _stderr
+        print(f"Warning: {e}")
         print("Trying to continue with limited functionality...")
+        sys.stderr = io.StringIO()
         try:
             app = create_app(skip_vector_db=True)
         except Exception as e2:
+            sys.stderr = _stderr
             print(f"Fatal error: {e2}")
             sys.exit(1)
+    finally:
+        sys.stderr = _stderr
 
     print("Chatbot ready! Type 'help' for available commands.\n")
 
@@ -142,7 +172,6 @@ def main():
                     print("  Results saved to: ./reports/evaluation_results.json\n")
 
                 except Exception as e:
-                    logger.error(f"Evaluation failed: {e}")
                     print(f"Error during evaluation: {e}\n")
 
             else:
@@ -159,7 +188,6 @@ def main():
             print("\n\nGoodbye!")
             break
         except Exception as e:
-            logger.error(f"Error in CLI: {e}")
             print(f"Error: {e}\n")
 
     app.shutdown()

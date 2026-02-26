@@ -1,4 +1,7 @@
 """Embedding models for RAG."""
+import warnings
+warnings.filterwarnings('ignore')
+
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from src.config import get_config
 from src.utils.logging import logger
