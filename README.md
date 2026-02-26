@@ -125,10 +125,13 @@ Tests included:
 - Hybrid Retrieval (SQL Agent + Vector DB)
 - Component initialization (embeddings, vector DB, LLM)
 - End-to-end workflow
+- **Agent Routing** (ReAct agent tool selection - greetings vs retrieval)
 - Data architecture verification
 
 **Reports** are auto-saved to `reports/` folder as:
 `{provider}_{model}_test_results_{timestamp}.md`
+
+For detailed testing methodology, metrics explanation, and how tests map to system components, see **[docs/TESTING.md](docs/TESTING.md)**.
 
 ---
 

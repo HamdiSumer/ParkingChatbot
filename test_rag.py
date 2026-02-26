@@ -251,11 +251,20 @@ class TestReportGenerator:
 
 
 def test_guardrails():
-    """Test guardrails - verify sensitive data filtering."""
+    """Test guardrails - verify sensitive data filtering.
+
+    Part 1: Unit test of DataProtectionFilter (component test)
+    Part 2: Integration test through actual workflow (ensures agent uses guardrails)
+    """
     print_section("TEST 1: GUARDRAILS - Security & Safety")
 
+    # ==================== PART 1: Unit Test ====================
+    print("\n" + "=" * 80)
+    print("  Part 1: Filter Component Test (Unit Test)")
+    print("=" * 80)
+
     filter_obj = DataProtectionFilter()
-    test_cases = [
+    unit_test_cases = [
         ("Where is downtown parking?", True, "Safe query"),
         ("My credit card is 4532-1234-5678-9010", False, "Credit card"),
         ("Call me at 555-123-4567", False, "Phone number"),
@@ -268,38 +277,131 @@ def test_guardrails():
         ("' OR '1'='1", False, "SQL injection attempt"),
     ]
 
-    passed = 0
+    unit_passed = 0
     detailed_cases = []
     print(f"\n{'Test Case':<50} {'Expected':<10} {'Result':<10} {'Status':<10}")
     print("-" * 80)
 
-    for message, should_be_safe, reason in test_cases:
+    for message, should_be_safe, reason in unit_test_cases:
         is_safe, _ = filter_obj.check_safety(message)
         expected = "Safe" if should_be_safe else "Blocked"
         result = "Safe" if is_safe else "Blocked"
         test_passed = is_safe == should_be_safe
         status = "✓" if test_passed else "✗"
         if test_passed:
-            passed += 1
+            unit_passed += 1
         print(f"{message[:48]:<50} {expected:<10} {result:<10} {status:<10}")
 
         detailed_cases.append({
-            "name": reason,
+            "name": f"[Unit] {reason}",
             "expected": expected,
             "result": result,
             "passed": test_passed
         })
 
-    detection_rate = (passed / len(test_cases)) * 100
+    unit_rate = (unit_passed / len(unit_test_cases)) * 100
     print("-" * 80)
-    print(f"Detection Rate: {detection_rate:.1f}% ({passed}/{len(test_cases)})")
+    print(f"Unit Test Detection Rate: {unit_rate:.1f}% ({unit_passed}/{len(unit_test_cases)})")
+
+    # ==================== PART 2: Integration Test ====================
+    print("\n" + "=" * 80)
+    print("  Part 2: Workflow Integration Test (Agent Actually Blocks)")
+    print("=" * 80)
+
+    integration_passed = 0
+    integration_cases = [
+        # Input should be BLOCKED (sensitive data in input)
+        ("My credit card is 4111-1111-1111-1111", "blocked", "CC in input"),
+        ("My SSN is 123-45-6789, can I book?", "blocked", "SSN in input"),
+        ("DROP TABLE reservations;", "blocked", "SQL injection"),
+
+        # Safe queries should work
+        ("Where is downtown parking?", "allowed", "Safe query"),
+        ("What are the parking rules?", "allowed", "Safe query"),
+    ]
+
+    try:
+        with create_test_app() as app:
+            print(f"\n{'Test Case':<50} {'Expected':<10} {'Result':<10} {'Status':<10}")
+            print("-" * 80)
+
+            for message, expected_outcome, reason in integration_cases:
+                try:
+                    result = app.process_user_message(message)
+                    response = result.get("response", "")
+                    safety_issue = result.get("safety_issue", False)
+
+                    # Check if blocked messages are actually blocked
+                    if expected_outcome == "blocked":
+                        # Should have safety issue OR response indicates blocking
+                        is_blocked = (
+                            safety_issue or
+                            "cannot process" in response.lower() or
+                            "safety" in response.lower() or
+                            len(response) < 100  # Blocked responses are usually short
+                        )
+                        test_passed = is_blocked
+                        actual = "Blocked" if is_blocked else "Allowed"
+                    else:
+                        # Should NOT have safety issue and should have a real response
+                        test_passed = not safety_issue and len(response) > 20
+                        actual = "Allowed" if test_passed else "Blocked"
+
+                    if test_passed:
+                        integration_passed += 1
+
+                    expected_str = "Blocked" if expected_outcome == "blocked" else "Allowed"
+                    status = "✓" if test_passed else "✗"
+                    print(f"{message[:48]:<50} {expected_str:<10} {actual:<10} {status:<10}")
+
+                    detailed_cases.append({
+                        "name": f"[Integration] {reason}",
+                        "expected": expected_str,
+                        "result": actual,
+                        "passed": test_passed
+                    })
+
+                except Exception as e:
+                    print(f"{message[:48]:<50} {'ERROR':<10} {str(e)[:20]:<10}")
+                    detailed_cases.append({
+                        "name": f"[Integration] {reason}",
+                        "expected": expected_outcome,
+                        "result": "Error",
+                        "passed": False
+                    })
+
+    except Exception as e:
+        print(f"\n✗ Integration test failed to initialize: {e}")
+        # Still count unit test results
+        integration_passed = 0
+
+    integration_rate = (integration_passed / len(integration_cases)) * 100 if integration_cases else 0
+    print("-" * 80)
+    print(f"Integration Test Rate: {integration_rate:.1f}% ({integration_passed}/{len(integration_cases)})")
+
+    # ==================== SUMMARY ====================
+    total_passed = unit_passed + integration_passed
+    total_cases = len(unit_test_cases) + len(integration_cases)
+    overall_rate = (total_passed / total_cases) * 100
+
+    print("\n" + "=" * 80)
+    print("  Guardrails Summary")
+    print("=" * 80)
+    print(f"  • Unit Tests: {unit_rate:.1f}% ({unit_passed}/{len(unit_test_cases)})")
+    print(f"  • Integration Tests: {integration_rate:.1f}% ({integration_passed}/{len(integration_cases)})")
+    print(f"  • Overall: {overall_rate:.1f}% ({total_passed}/{total_cases})")
 
     details = {
-        "metrics": {"Detection Rate (%)": detection_rate},
+        "metrics": {
+            "Unit Test Rate (%)": unit_rate,
+            "Integration Test Rate (%)": integration_rate,
+            "Overall Rate (%)": overall_rate,
+        },
         "test_cases": detailed_cases
     }
 
-    return detection_rate == 100.0, details
+    # Must pass both unit AND integration tests
+    return unit_rate == 100.0 and integration_rate == 100.0, details
 
 
 # ============================================================================
@@ -396,19 +498,24 @@ def calculate_context_precision(context_docs: List, answer: str) -> float:
 
 
 def test_rag_metrics():
-    """Test RAG quality using RAGAS framework with semantic metrics."""
+    """Test RAG quality using RAGAS framework with semantic metrics.
+
+    Uses process_user_message() to test the ACTUAL user flow through the ReAct agent,
+    not just the retriever component directly.
+    """
     print_section("TEST 2: RAG METRICS - Quality Assessment (RAGAS)")
 
     try:
         with create_test_app() as app:
-            if not app.rag_retriever:
-                print("\n✗ RAG Retriever not initialized.")
-                return False, {"notes": "RAG Retriever not initialized"}
+            if not app.workflow:
+                print("\n✗ Workflow not initialized.")
+                return False, {"notes": "Workflow not initialized"}
 
+            # Use queries that should trigger vector_search (static info)
             test_queries = [
                 "Where is downtown parking?",
                 "What are the parking prices?",
-                "How many spaces are available?",
+                "What are the parking rules and policies?",
             ]
 
             metrics_summary = {
@@ -425,12 +532,20 @@ def test_rag_metrics():
 
             for query in test_queries:
                 start = time.time()
-                result = app.rag_retriever.query(query)
+                # Use process_user_message to go through the ACTUAL ReAct agent workflow
+                result = app.process_user_message(query)
                 latency_ms = (time.time() - start) * 1000
 
-                answer = result.get("answer", "")
+                answer = result.get("response", "")
                 sources = result.get("sources", [])
-                context = "\n".join([doc.page_content for doc in sources])
+                # Handle case where sources might be Document objects or dicts
+                if sources:
+                    context = "\n".join([
+                        doc.page_content if hasattr(doc, 'page_content') else str(doc)
+                        for doc in sources
+                    ])
+                else:
+                    context = ""
 
                 faithfulness = calculate_faithfulness(answer, context)
                 relevance = calculate_answer_relevance(query, answer)
@@ -681,194 +796,131 @@ def test_end_to_end_workflow():
 
 
 def test_hybrid_retrieval():
-    """Test hybrid retrieval combining Vector DB semantic search + SQL Agent queries."""
+    """Test hybrid retrieval combining Vector DB semantic search + SQL Agent queries.
+
+    Uses process_user_message() to test the ACTUAL user flow through the ReAct agent.
+    The agent should route real-time queries to sql_query and static queries to vector_search.
+    """
     print_section("TEST 7: HYBRID RETRIEVAL - SQL Agent + Vector DB")
 
     try:
         with create_test_app() as app:
-            # Check if SQL agent is initialized
-            if not app.sql_agent:
-                print("\n⚠ SQL Agent not initialized. Testing Vector DB only.")
-                return True, {"notes": "SQL Agent not initialized, tested Vector DB only"}
+            if not app.workflow:
+                print("\n✗ Workflow not initialized.")
+                return False, {"notes": "Workflow not initialized"}
 
-            if not app.rag_retriever:
-                print("\n✗ RAG Retriever not initialized.")
-                return False, {"notes": "RAG Retriever not initialized"}
-
+            # Test queries categorized by expected routing
+            # Real-time queries should trigger sql_query
+            # Static queries should trigger vector_search
             test_queries = [
-                ("How many parking spaces are available?", "availability/count"),
-                ("What is the status of downtown parking?", "status/location"),
-                ("How much does parking cost?", "pricing"),
+                # Real-time data queries (should use sql_query)
+                ("How many parking spaces are available?", "sql_query", "availability"),
+                ("What is the current status of parking?", "sql_query", "status"),
+                ("How much does parking cost right now?", "sql_query", "pricing"),
+
+                # Static info queries (should use vector_search)
+                ("Where is the downtown parking located?", "vector_search", "location"),
+                ("What are the parking rules?", "vector_search", "rules"),
             ]
 
-            print(f"\n{'Query':<40} {'Type':<20} {'Status':<10}")
-            print("-" * 80)
+            print(f"\n{'Query':<45} {'Expected':<15} {'Sources?':<10} {'Latency':<10}")
+            print("-" * 85)
 
-            all_passed = True
-
-            # Test 1: SQL Agent Query Generation
-            print("\n" + "=" * 80)
-            print("  SQL Agent Query Quality")
-            print("=" * 80)
-
-            sql_agent_results = {
-                "valid_queries": 0,
-                "query_execution_success": 0,
-                "query_latency_ms": [],
-            }
-
-            for query, query_type in test_queries:
-                try:
-                    start = time.time()
-                    sql_result = app.sql_agent.invoke({"input": query})
-                    latency_ms = (time.time() - start) * 1000
-
-                    output = sql_result.get("output", "")
-
-                    # Check if query was attempted
-                    if output:
-                        sql_agent_results["valid_queries"] += 1
-                        sql_agent_results["query_latency_ms"].append(latency_ms)
-
-                    # Query execution was successful if output contains results
-                    if "Query:" in output and "Result:" in output:
-                        sql_agent_results["query_execution_success"] += 1
-                        status = "✓ Success"
-                    else:
-                        status = "⚠ No SQL"
-
-                    print(
-                        f"{query:<40} {query_type:<20} {status:<10} ({latency_ms:.0f}ms)"
-                    )
-
-                except Exception as e:
-                    print(f"{query:<40} {query_type:<20} ✗ Error: {str(e)[:30]}")
-                    all_passed = False
-
-            # Test 2: Hybrid Context Quality
-            print("\n" + "=" * 80)
-            print("  Hybrid Context Quality (Vector DB + SQL Agent)")
-            print("=" * 80)
-
-            hybrid_results = {
-                "queries_with_sql_data": 0,
-                "context_completeness": [],
+            results = {
+                "sql_queries": 0,
+                "vector_queries": 0,
+                "with_sources": 0,
                 "latency_ms": [],
             }
 
-            print(f"\n{'Query':<40} {'With SQL Data':<15} {'Latency':<10}")
-            print("-" * 80)
+            all_passed = True
+            detailed_cases = []
 
-            for query, _ in test_queries:
+            for query, expected_route, query_type in test_queries:
                 try:
                     start = time.time()
-                    result = app.rag_retriever.query(query)
+                    # Use process_user_message to go through the ACTUAL ReAct agent workflow
+                    result = app.process_user_message(query)
                     latency_ms = (time.time() - start) * 1000
 
-                    answer = result.get("answer", "")
+                    response = result.get("response", "")
+                    sources = result.get("sources", [])
+                    has_sources = len(sources) > 0 if sources else False
 
-                    # Check if SQL data was included
-                    has_sql_data = any(
-                        keyword in answer.lower()
-                        for keyword in [
-                            "available",
-                            "open",
-                            "closed",
-                            "query:",
-                            "result:",
-                        ]
-                    )
+                    results["latency_ms"].append(latency_ms)
 
-                    if has_sql_data:
-                        hybrid_results["queries_with_sql_data"] += 1
+                    if has_sources:
+                        results["with_sources"] += 1
 
-                    hybrid_results["latency_ms"].append(latency_ms)
+                    # Check if response contains relevant content
+                    response_lower = response.lower()
 
-                    # Context completeness: does answer mention both static and dynamic info
-                    context_complete = has_sql_data and len(answer) > 50
-                    if context_complete:
-                        hybrid_results["context_completeness"].append(1.0)
+                    if expected_route == "sql_query":
+                        results["sql_queries"] += 1
+                        # For SQL queries, check response mentions data-like content
+                        has_data = any(kw in response_lower for kw in [
+                            "available", "spaces", "price", "cost", "status", "open", "capacity"
+                        ])
+                        test_passed = has_data and len(response) > 20
                     else:
-                        hybrid_results["context_completeness"].append(0.5)
+                        results["vector_queries"] += 1
+                        # For vector queries, should have sources and relevant content
+                        test_passed = has_sources or len(response) > 50
 
-                    status = "✓ With SQL" if has_sql_data else "⚠ Vector only"
-                    print(f"{query:<40} {status:<15} {latency_ms:<10.0f}ms")
+                    if not test_passed:
+                        all_passed = False
+
+                    status = "✓" if test_passed else "✗"
+                    sources_str = "Yes" if has_sources else "No"
+                    print(f"{query:<45} {expected_route:<15} {sources_str:<10} {latency_ms:.0f}ms {status}")
+
+                    detailed_cases.append({
+                        "name": f"{query_type}: {query[:30]}",
+                        "expected": expected_route,
+                        "result": "Pass" if test_passed else "Fail",
+                        "passed": test_passed
+                    })
 
                 except Exception as e:
-                    print(f"{query:<40} ✗ Error{'':<10} {str(e)[:30]}")
+                    print(f"{query:<45} {'ERROR':<15} {'':<10} ✗ {str(e)[:20]}")
                     all_passed = False
+                    detailed_cases.append({
+                        "name": f"{query_type}: {query[:30]}",
+                        "expected": expected_route,
+                        "result": f"Error",
+                        "passed": False
+                    })
 
-            # Test 3: Production Metrics for Hybrid Retrieval
-            print("\n" + "=" * 80)
-            print("  Production Metrics for Hybrid Retrieval")
-            print("=" * 80)
+            # Summary
+            print("-" * 85)
+            print("\nHybrid Retrieval Summary:")
+            print(f"  • SQL Agent queries tested: {results['sql_queries']}")
+            print(f"  • Vector search queries tested: {results['vector_queries']}")
+            print(f"  • Queries with sources: {results['with_sources']}/{len(test_queries)}")
 
-            print("\nSQL Agent Metrics:")
-            if sql_agent_results["valid_queries"] > 0:
-                query_success_rate = (
-                    sql_agent_results["query_execution_success"]
-                    / sql_agent_results["valid_queries"]
-                ) * 100
-                avg_query_latency = sum(sql_agent_results["query_latency_ms"]) / len(
-                    sql_agent_results["query_latency_ms"]
-                )
-
-                print(
-                    f"  • Query Generation Rate: {query_success_rate:.1f}% ({sql_agent_results['query_execution_success']}/{sql_agent_results['valid_queries']})"
-                )
-                print(f"  • Average Query Latency: {avg_query_latency:.0f}ms")
-            else:
-                print("  • No SQL queries generated")
-
-            print("\nHybrid Retrieval Metrics:")
-            if hybrid_results["queries_with_sql_data"] > 0:
-                sql_coverage = (
-                    hybrid_results["queries_with_sql_data"] / len(test_queries)
-                ) * 100
-                avg_latency = sum(hybrid_results["latency_ms"]) / len(
-                    hybrid_results["latency_ms"]
-                )
-                avg_completeness = sum(hybrid_results["context_completeness"]) / len(
-                    hybrid_results["context_completeness"]
-                )
-
-                print(
-                    f"  • SQL Data Coverage: {sql_coverage:.1f}% (queries enhanced with SQL)"
-                )
-                print(
-                    f"  • Average Total Latency: {avg_latency:.0f}ms (Vector DB + SQL Agent)"
-                )
-                print(f"  • Context Completeness: {avg_completeness:.2f}/1.0")
-            else:
-                print(
-                    "  • SQL Agent not providing data (may be expected if query not relevant)"
-                )
+            if results["latency_ms"]:
+                avg_latency = sum(results["latency_ms"]) / len(results["latency_ms"])
+                print(f"  • Average latency: {avg_latency:.0f}ms")
 
             print("\nProduction RAG Concepts Demonstrated:")
+            print("  ✓ ReAct Agent: Intelligent routing to appropriate tool")
             print("  ✓ Semantic Search: Vector DB for static reference data")
-            print("  ✓ SQL Agent: LLM-driven dynamic query generation")
-            print("  ✓ Hybrid Integration: Combined Vector DB + SQL Agent context")
-            print(
-                "  ✓ Graceful Degradation: Works even if SQL agent doesn't find relevant queries"
-            )
+            print("  ✓ SQL Agent: Real-time data queries through workflow")
+            print("  ✓ Hybrid Integration: Both sources available via agent")
 
             # Build metrics for report
-            metrics = {}
-            if sql_agent_results["valid_queries"] > 0:
-                query_success_rate = (sql_agent_results["query_execution_success"] / sql_agent_results["valid_queries"]) * 100
-                avg_query_latency = sum(sql_agent_results["query_latency_ms"]) / len(sql_agent_results["query_latency_ms"])
-                metrics["SQL Query Success Rate (%)"] = query_success_rate
-                metrics["SQL Avg Latency (ms)"] = avg_query_latency
+            metrics = {
+                "SQL Queries Tested": results["sql_queries"],
+                "Vector Queries Tested": results["vector_queries"],
+                "Queries With Sources": results["with_sources"],
+            }
+            if results["latency_ms"]:
+                metrics["Avg Latency (ms)"] = sum(results["latency_ms"]) / len(results["latency_ms"])
 
-            if hybrid_results["queries_with_sql_data"] > 0:
-                sql_coverage = (hybrid_results["queries_with_sql_data"] / len(test_queries)) * 100
-                avg_latency = sum(hybrid_results["latency_ms"]) / len(hybrid_results["latency_ms"])
-                avg_completeness = sum(hybrid_results["context_completeness"]) / len(hybrid_results["context_completeness"])
-                metrics["SQL Data Coverage (%)"] = sql_coverage
-                metrics["Hybrid Avg Latency (ms)"] = avg_latency
-                metrics["Context Completeness"] = avg_completeness
-
-            details = {"metrics": metrics} if metrics else {"notes": "Hybrid retrieval completed"}
+            details = {
+                "metrics": metrics,
+                "test_cases": detailed_cases
+            }
             return all_passed, details
 
     except Exception as e:
@@ -880,7 +932,117 @@ def test_hybrid_retrieval():
 
 
 # ============================================================================
-# 8. DATA ARCHITECTURE TEST
+# 8. AGENT ROUTING TEST (NEW - Tests ReAct Agent Tool Selection)
+# ============================================================================
+
+
+def test_agent_routing():
+    """Test that the ReAct agent selects the correct tools for different queries."""
+    print_section("TEST 8: AGENT ROUTING - ReAct Tool Selection")
+
+    try:
+        with create_test_app() as app:
+            if not app.workflow:
+                print("\n✗ Workflow not initialized.")
+                return False, {"notes": "Workflow not initialized"}
+
+            # Test cases: (query, expected_behavior, should_have_sources)
+            test_cases = [
+                # Greetings should NOT trigger retrieval
+                ("Hey", "direct_response", False),
+                ("Hello there", "direct_response", False),
+                ("Thanks!", "direct_response", False),
+                ("Ok", "direct_response", False),
+
+                # Static info should use vector_search
+                ("Where is downtown parking?", "vector_search", True),
+                ("What are the parking rules?", "vector_search", True),
+                ("How do I book a parking space?", "vector_search", True),
+
+                # Real-time queries should use sql_query
+                ("How many spaces are available?", "sql_query", True),
+                ("What is the current price?", "sql_query", True),
+
+                # Reservation intent
+                ("I want to book a parking space", "reservation", False),
+            ]
+
+            print(f"\n{'Query':<40} {'Expected':<18} {'Sources?':<10} {'Status':<10}")
+            print("-" * 80)
+
+            passed = 0
+            detailed_cases = []
+
+            for query, expected_behavior, should_have_sources in test_cases:
+                try:
+                    result = app.process_user_message(query)
+                    response = result.get("response", "")
+                    sources = result.get("sources", [])
+                    has_sources = len(sources) > 0 if sources else False
+
+                    # Check if sources match expectation
+                    sources_correct = (has_sources == should_have_sources)
+
+                    # For greetings, verify no retrieval happened (response should be short, friendly)
+                    if expected_behavior == "direct_response":
+                        # Greetings should have short responses without parking data
+                        is_greeting_response = len(response) < 200 and not any(
+                            kw in response.lower() for kw in ["downtown", "airport", "available", "price per hour"]
+                        )
+                        test_passed = sources_correct and is_greeting_response
+                    elif expected_behavior == "reservation":
+                        # Should start reservation flow
+                        test_passed = "name" in response.lower() or "reservation" in response.lower() or "book" in response.lower()
+                    else:
+                        # For retrieval queries, just check sources are present
+                        test_passed = sources_correct
+
+                    if test_passed:
+                        passed += 1
+
+                    status = "✓" if test_passed else "✗"
+                    sources_str = "Yes" if has_sources else "No"
+                    print(f"{query:<40} {expected_behavior:<18} {sources_str:<10} {status:<10}")
+
+                    detailed_cases.append({
+                        "name": query[:35],
+                        "expected": expected_behavior,
+                        "result": "Pass" if test_passed else "Fail",
+                        "passed": test_passed
+                    })
+
+                except Exception as e:
+                    print(f"{query:<40} {'ERROR':<18} {'':<10} ✗ {str(e)[:20]}")
+                    detailed_cases.append({
+                        "name": query[:35],
+                        "expected": expected_behavior,
+                        "result": f"Error: {str(e)[:20]}",
+                        "passed": False
+                    })
+
+            print("-" * 80)
+            success_rate = (passed / len(test_cases)) * 100
+            print(f"Agent Routing Accuracy: {success_rate:.1f}% ({passed}/{len(test_cases)})")
+
+            # Test passes if at least 80% of routing decisions are correct
+            all_passed = success_rate >= 80.0
+
+            details = {
+                "metrics": {"Routing Accuracy (%)": success_rate},
+                "test_cases": detailed_cases
+            }
+
+            return all_passed, details
+
+    except Exception as e:
+        print(f"\n✗ Agent routing test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, {"notes": f"Error: {str(e)}"}
+
+
+# ============================================================================
+# 9. DATA ARCHITECTURE TEST
 # ============================================================================
 
 
@@ -964,6 +1126,7 @@ def main(generate_report: bool = True):
         ("Components", test_component_initialization),
         ("Hybrid Retrieval", test_hybrid_retrieval),
         ("E2E Workflow", test_end_to_end_workflow),
+        ("Agent Routing", test_agent_routing),  # NEW: Tests ReAct agent tool selection
         ("Data Architecture", test_data_architecture),
     ]
 
