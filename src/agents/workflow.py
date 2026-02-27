@@ -13,9 +13,12 @@ from src.agents.prompts import (
     AGENT_DECISION_PROMPT,
     DIRECT_RESPONSE_PROMPT,
     SYNTHESIS_PROMPT,
+    STATUS_CHECK_PROMPT,
     format_conversation_history,
     format_tool_results,
 )
+from src.admin.admin_service import AdminService
+from src.agents.admin_agent import AdminAgent
 from src.rag.retriever import ParkingRAGRetriever
 from src.database.sql_db import ParkingDatabase
 from src.guardrails.filter import DataProtectionFilter
@@ -46,6 +49,12 @@ class ParkingChatbotWorkflow:
         self.guard_rails = guard_rails
         self.sql_agent = sql_agent
         self.llm = create_llm(temperature=0.3)
+        self.admin_service = AdminService(db)
+
+        # Initialize Admin Agent for handling reservations
+        # This agent communicates with admin via REST API (or direct DB as fallback)
+        self.admin_agent = AdminAgent(db=db, use_api=True)
+        logger.info("Admin Agent initialized for reservation handling")
 
         # Initialize tool registry
         vector_store = rag_retriever.vector_store if rag_retriever else None
@@ -72,6 +81,7 @@ class ParkingChatbotWorkflow:
         workflow.add_node("synthesize", self._synthesize_node)
         workflow.add_node("collect_reservation", self._collect_reservation_node)
         workflow.add_node("admin_review", self._admin_review_node)
+        workflow.add_node("check_status", self._check_status_node)
         workflow.add_node("output_filter", self._output_filter_node)
 
         # Start with safety check
@@ -96,6 +106,7 @@ class ParkingChatbotWorkflow:
                 "sql_query": "sql_query",
                 "direct_response": "direct_response",
                 "start_reservation": "collect_reservation",
+                "check_status": "check_status",
                 "synthesize": "synthesize",
             },
         )
@@ -139,6 +150,9 @@ class ParkingChatbotWorkflow:
         # Admin review to output
         workflow.add_edge("admin_review", "output_filter")
 
+        # Status check to output
+        workflow.add_edge("check_status", "output_filter")
+
         # Output filter ends
         workflow.add_edge("output_filter", END)
 
@@ -163,6 +177,18 @@ class ParkingChatbotWorkflow:
     def _agent_decide_node(self, state: ConversationState) -> ConversationState:
         """ReAct agent decision node - decides what action to take."""
         logger.info(f"Agent deciding action for: {state.current_message[:50]}...")
+
+        # IMPORTANT: If we're in an ongoing reservation flow, continue collecting data
+        if state.conversation_type == "reservation" and state.next_expected_field:
+            logger.info(f"Continuing reservation flow, expecting: {state.next_expected_field}")
+            state.agent_decision = "start_reservation"
+            return state
+
+        # If we're in status check mode (user was asked to provide identification)
+        if state.conversation_type == "status_check":
+            logger.info("Continuing status check flow with user-provided info")
+            state.agent_decision = "check_status"
+            return state
 
         # Check iteration limit
         if state.iteration_count >= state.max_iterations:
@@ -225,6 +251,12 @@ class ParkingChatbotWorkflow:
             parking_words = ["park", "parking", "space", "spot", "book", "reserve", "price", "cost", "available", "location", "where"]
             if not any(pw in msg_lower for pw in parking_words):
                 return "direct_response"
+
+        # Check for status check intent
+        status_words = ["status", "check reservation", "my reservation", "booking status", "res_"]
+        if any(sw in msg_lower for sw in status_words):
+            logger.info("Detected status check intent")
+            return "check_status"
 
         # Check for reservation intent
         reservation_words = ["book", "reserve", "reservation", "make a booking"]
@@ -446,13 +478,18 @@ class ParkingChatbotWorkflow:
         return state
 
     def _admin_review_node(self, state: ConversationState) -> ConversationState:
-        """Submit reservation to admin for review."""
-        logger.info("Submitting reservation for admin review")
+        """Submit reservation to Admin Agent for review.
+
+        The Admin Agent handles:
+        - Creating the reservation in the database
+        - Sending notification to admin via REST API
+        - Returning reservation ID and status
+        """
+        logger.info("Submitting reservation to Admin Agent for review")
 
         if state.reservation_data.get("name") and state.reservation_data.get("surname"):
-            res_id = f"RES_{uuid.uuid4().hex[:8].upper()}"
-            success = self.db.create_reservation(
-                res_id=res_id,
+            # Use Admin Agent to submit reservation (handles API/DB and notifications)
+            result = self.admin_agent.submit_reservation(
                 user_name=state.reservation_data["name"],
                 user_surname=state.reservation_data["surname"],
                 car_number=state.reservation_data["car_number"],
@@ -461,16 +498,219 @@ class ParkingChatbotWorkflow:
                 end_time=state.reservation_data.get("end_time", datetime.utcnow()),
             )
 
-            if success:
+            if result["success"]:
+                res_id = result["reservation_id"]
                 state.chatbot_response = (
-                    f"Your reservation {res_id} is pending admin approval. "
-                    "You will be notified once it's reviewed."
+                    f"Your reservation **{res_id}** has been submitted and is pending admin approval.\n\n"
+                    f"The administrator has been notified and will review your request shortly.\n"
+                    f"You can check the status anytime by saying 'check status {res_id}' or 'check my reservation'."
                 )
-                logger.info(f"Reservation {res_id} created")
+                logger.info(f"Reservation {res_id} submitted via Admin Agent")
             else:
-                state.chatbot_response = "Failed to create reservation. Please try again."
+                state.chatbot_response = f"Failed to create reservation: {result['message']}. Please try again."
+                logger.error(f"Failed to create reservation: {result['message']}")
 
         return state
+
+    def _check_status_node(self, state: ConversationState) -> ConversationState:
+        """Handle reservation status check requests."""
+        logger.info("Processing status check request")
+        state.checking_status = True
+
+        msg = state.current_message
+        msg_upper = msg.upper()
+        msg_words = set(word.lower() for word in re.findall(r'\b[a-zA-Z]+\b', msg))
+        reservations = []
+
+        # Method 1: Look for RES_ pattern (case-insensitive)
+        res_match = re.search(r'RES_[A-Za-z0-9]+', msg, re.IGNORECASE)
+        if res_match:
+            res_id = res_match.group(0).upper()
+            status_info = self.admin_service.get_reservation_status(res_id)
+            if status_info:
+                reservations = [status_info]
+
+        # Method 2: If no reservation found by ID, try to find by car number
+        if not reservations:
+            # Look for car number pattern (e.g., ABC-123, ABC123, 34-ABC-123)
+            car_patterns = [
+                r'\b[A-Z]{2,3}[-\s]?\d{2,4}\b',  # ABC-123, AB-1234
+                r'\b\d{2}[-\s]?[A-Z]{2,3}[-\s]?\d{2,4}\b',  # 34-ABC-123
+                r'\b[A-Z]{1,3}\d{3,4}\b',  # ABC1234
+            ]
+            car_number = None
+            for pattern in car_patterns:
+                car_match = re.search(pattern, msg_upper)
+                if car_match:
+                    car_number = car_match.group(0)
+                    break
+
+            if car_number:
+                # Search all reservations for this car number
+                all_pending = self.admin_service.get_pending_reservations()
+                all_reviewed = self.admin_service.get_reviewed_history(50)
+
+                for res in all_pending + all_reviewed:
+                    if res.get("car_number", "").upper() == car_number.upper():
+                        full_info = self.admin_service.get_reservation_status(res["id"])
+                        if full_info:
+                            reservations.append(full_info)
+
+        # Method 3: Try to find by name in message
+        if not reservations:
+            # Get recent reservations and check if name matches
+            all_pending = self.admin_service.get_pending_reservations()
+            all_reviewed = self.admin_service.get_reviewed_history(50)
+
+            for res in all_pending + all_reviewed:
+                name_match = (
+                    res.get("user_name", "").lower() in msg_words or
+                    res.get("user_surname", "").lower() in msg_words
+                )
+                if name_match:
+                    full_info = self.admin_service.get_reservation_status(res["id"])
+                    if full_info:
+                        # Get full details including name
+                        details = self.admin_service.get_reservation_details(res["id"])
+                        if details:
+                            full_info["user_name"] = details.get("user_name", "")
+                            full_info["user_surname"] = details.get("user_surname", "")
+                            full_info["car_number"] = details.get("car_number", "")
+                        reservations.append(full_info)
+
+        # No reservations found - check if user provided any identifying info
+        # Exclude common words that are NOT identifying info
+        noise_words = {
+            'i', 'want', 'to', 'check', 'status', 'of', 'my', 'the', 'a', 'an',
+            'reservation', 'reservations', 'booking', 'bookings', 'please', 'can',
+            'you', 'help', 'me', 'find', 'what', 'is', 'are', 'for', 'with'
+        }
+        potential_name_words = [w for w in msg_words if w not in noise_words and len(w) > 2 and w.isalpha()]
+
+        has_identifying_info = (
+            res_match or  # Had a reservation ID
+            any(re.search(p, msg_upper) for p in car_patterns) or  # Had a car number pattern
+            len(potential_name_words) >= 1  # Had at least one potential name word
+        )
+
+        if not reservations and not has_identifying_info:
+            # User didn't provide any identifying info - ask for it
+            state.chatbot_response = (
+                "I'd be happy to help you check your reservation status!\n\n"
+                "Please provide one of the following:\n"
+                "- Your **name** (e.g., 'John Smith')\n"
+                "- Your **car registration number** (e.g., 'ABC-123')\n"
+                "- Your **reservation ID** (e.g., 'RES_ABC12345')"
+            )
+            # Stay in status check mode to continue the conversation
+            state.conversation_type = "status_check"
+            return state
+
+        if not reservations:
+            # User provided info but no reservations found
+            state.chatbot_response = (
+                "I couldn't find any reservations matching your query.\n\n"
+                "Please try with:\n"
+                "- Your full name as used when booking\n"
+                "- Your car registration number\n"
+                "- Or your reservation ID (starts with RES_)"
+            )
+            return state
+
+        # Format response for found reservations
+        if len(reservations) == 1:
+            status_info = reservations[0]
+            state.chatbot_response = self._format_single_reservation_status(status_info)
+        else:
+            # Multiple reservations found
+            state.chatbot_response = self._format_multiple_reservations_status(reservations)
+
+        # Reset status check state
+        state.checking_status = False
+        state.conversation_type = "general"  # Reset to general after successful lookup
+        return state
+
+    def _format_single_reservation_status(self, status_info: dict) -> str:
+        """Format status response for a single reservation."""
+        res_id = status_info["id"]
+        status = status_info["status"]
+        parking_name = status_info.get("parking_name", status_info.get("parking_id", "Unknown"))
+
+        # Include user info if available
+        user_info = ""
+        if status_info.get("user_name"):
+            user_info = f"- Name: {status_info.get('user_name', '')} {status_info.get('user_surname', '')}\n"
+        if status_info.get("car_number"):
+            user_info += f"- Car: {status_info.get('car_number', '')}\n"
+
+        if status == "pending":
+            return (
+                f"**Reservation Status: PENDING**\n\n"
+                f"- ID: {res_id}\n"
+                f"{user_info}"
+                f"- Parking: {parking_name}\n"
+                f"- Time: {self._format_datetime(status_info['start_time'])} to {self._format_datetime(status_info['end_time'])}\n\n"
+                "Your reservation is awaiting admin approval. Please check back later."
+            )
+        elif status == "confirmed":
+            approved_by = status_info.get("approved_by", "Admin")
+            return (
+                f"**Reservation Status: APPROVED**\n\n"
+                f"- ID: {res_id}\n"
+                f"{user_info}"
+                f"- Parking: {parking_name}\n"
+                f"- Time: {self._format_datetime(status_info['start_time'])} to {self._format_datetime(status_info['end_time'])}\n"
+                f"- Approved by: {approved_by}\n\n"
+                "You're all set! Have a great parking experience."
+            )
+        elif status == "rejected":
+            reason = status_info.get("rejection_reason", "No reason provided")
+            return (
+                f"**Reservation Status: REJECTED**\n\n"
+                f"- ID: {res_id}\n"
+                f"{user_info}"
+                f"- Reason: {reason}\n\n"
+                "Please try booking a different time or parking location. "
+                "Type 'book parking' to make a new reservation."
+            )
+        else:
+            return (
+                f"**Reservation Status: {status.upper()}**\n\n"
+                f"- ID: {res_id}\n"
+                f"{user_info}"
+                f"- Parking: {parking_name}\n"
+                f"- Time: {self._format_datetime(status_info['start_time'])} to {self._format_datetime(status_info['end_time'])}"
+            )
+
+    def _format_multiple_reservations_status(self, reservations: list) -> str:
+        """Format status response for multiple reservations."""
+        lines = ["**Found multiple reservations:**\n"]
+
+        for res in reservations[:5]:  # Limit to 5 results
+            status = res["status"].upper()
+            if status == "CONFIRMED":
+                status = "APPROVED"
+
+            parking_name = res.get("parking_name", res.get("parking_id", "Unknown"))
+            user_name = f"{res.get('user_name', '')} {res.get('user_surname', '')}".strip()
+
+            lines.append(f"**{res['id']}** - {status}")
+            if user_name:
+                lines.append(f"  Name: {user_name}")
+            lines.append(f"  Parking: {parking_name}")
+            lines.append(f"  Time: {self._format_datetime(res['start_time'])}")
+            lines.append("")
+
+        if len(reservations) > 5:
+            lines.append(f"_...and {len(reservations) - 5} more_")
+
+        return "\n".join(lines)
+
+    def _format_datetime(self, dt) -> str:
+        """Format datetime for display."""
+        if isinstance(dt, datetime):
+            return dt.strftime("%Y-%m-%d %H:%M")
+        return str(dt) if dt else "N/A"
 
     # ==================== ROUTERS ====================
 
@@ -480,10 +720,10 @@ class ParkingChatbotWorkflow:
 
     def _agent_action_router(
         self, state: ConversationState
-    ) -> Literal["vector_search", "sql_query", "direct_response", "start_reservation", "synthesize"]:
+    ) -> Literal["vector_search", "sql_query", "direct_response", "start_reservation", "check_status", "synthesize"]:
         """Route based on agent decision."""
         decision = state.agent_decision
-        valid = ["vector_search", "sql_query", "direct_response", "start_reservation", "synthesize"]
+        valid = ["vector_search", "sql_query", "direct_response", "start_reservation", "check_status", "synthesize"]
         return decision if decision in valid else "direct_response"
 
     def _tool_continuation_router(

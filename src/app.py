@@ -10,6 +10,7 @@ from src.database.sql_db import ParkingDatabase
 from src.agents.workflow import ParkingChatbotWorkflow
 from src.guardrails.filter import DataProtectionFilter
 from src.evaluation.test_data import get_sample_parking_documents
+from src.admin.admin_service import AdminService
 from typing import Optional
 
 
@@ -39,6 +40,10 @@ class ParkingChatbotApp:
         # Initialize databases
         self.db = ParkingDatabase()
         logger.info("✓ SQL Database initialized")
+
+        # Initialize admin service
+        self.admin_service = AdminService(self.db)
+        logger.info("✓ Admin Service initialized")
 
         # Initialize Vector Database (Weaviate only)
         self.vector_store = None
@@ -209,6 +214,64 @@ class ParkingChatbotApp:
             ]
         finally:
             session.close()
+
+    # ==================== ADMIN METHODS ====================
+
+    def get_pending_reservations(self) -> list:
+        """Get all pending reservations awaiting admin review.
+
+        Returns:
+            List of pending reservation dictionaries.
+        """
+        return self.admin_service.get_pending_reservations()
+
+    def approve_reservation(self, res_id: str, admin_name: str, notes: str = None) -> dict:
+        """Approve a reservation.
+
+        Args:
+            res_id: Reservation ID to approve.
+            admin_name: Name of admin performing approval.
+            notes: Optional notes about the approval.
+
+        Returns:
+            Dict with success status and message.
+        """
+        return self.admin_service.approve_reservation(res_id, admin_name, notes)
+
+    def reject_reservation(self, res_id: str, admin_name: str, reason: str) -> dict:
+        """Reject a reservation.
+
+        Args:
+            res_id: Reservation ID to reject.
+            admin_name: Name of admin performing rejection.
+            reason: Reason for rejection.
+
+        Returns:
+            Dict with success status and message.
+        """
+        return self.admin_service.reject_reservation(res_id, admin_name, reason)
+
+    def check_reservation_status(self, res_id: str) -> Optional[dict]:
+        """Check the status of a reservation.
+
+        Args:
+            res_id: Reservation ID to check.
+
+        Returns:
+            Dict with status info or None if not found.
+        """
+        return self.admin_service.get_reservation_status(res_id)
+
+    def get_reservation_details(self, res_id: str) -> Optional[dict]:
+        """Get full details of a reservation.
+
+        Args:
+            res_id: Reservation ID.
+
+        Returns:
+            Reservation details dict or None if not found.
+        """
+        return self.admin_service.get_reservation_details(res_id)
 
     def shutdown(self):
         """Cleanup and shutdown the application."""

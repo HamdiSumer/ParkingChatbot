@@ -1042,7 +1042,220 @@ def test_agent_routing():
 
 
 # ============================================================================
-# 9. DATA ARCHITECTURE TEST
+# 9. ADMIN FLOW TEST (Human-in-the-Loop)
+# ============================================================================
+
+
+def test_admin_flow():
+    """Test the admin reservation approval/rejection flow."""
+    print_section("TEST 9: ADMIN FLOW - Human-in-the-Loop Approval")
+
+    try:
+        from src.database.sql_db import ParkingDatabase
+        from src.admin.admin_service import AdminService
+        from datetime import datetime, timedelta
+        import uuid
+
+        # Use a separate test database
+        test_db_path = "./data/test_admin.db"
+
+        # Clean up any existing test db
+        import os
+        if os.path.exists(test_db_path):
+            os.remove(test_db_path)
+
+        db = ParkingDatabase(db_path=test_db_path)
+        admin_service = AdminService(db)
+
+        test_cases = []
+        all_passed = True
+
+        # Test 1: Create a test reservation
+        print("\n1. Creating test reservation...")
+        res_id = f"RES_TEST_{uuid.uuid4().hex[:6].upper()}"
+        start_time = datetime.now() + timedelta(hours=1)
+        end_time = datetime.now() + timedelta(hours=3)
+
+        # Add a parking space first
+        db.add_parking_space(
+            id="test_parking",
+            name="Test Parking",
+            location="Test Location",
+            capacity=100,
+            price_per_hour=5.0
+        )
+
+        success = db.create_reservation(
+            res_id=res_id,
+            user_name="John",
+            user_surname="Doe",
+            car_number="ABC-123",
+            parking_id="test_parking",
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        test_passed = success
+        status = "✓" if test_passed else "✗"
+        print(f"   {status} Reservation {res_id} created")
+        test_cases.append({
+            "name": "Create Reservation",
+            "expected": "Success",
+            "result": "Success" if test_passed else "Failed",
+            "passed": test_passed
+        })
+        if not test_passed:
+            all_passed = False
+
+        # Test 2: Verify reservation is pending
+        print("\n2. Verifying pending status...")
+        pending = admin_service.get_pending_reservations()
+        test_passed = any(r["id"] == res_id for r in pending)
+        status = "✓" if test_passed else "✗"
+        print(f"   {status} Reservation appears in pending list")
+        test_cases.append({
+            "name": "Pending List",
+            "expected": "In pending",
+            "result": "Found" if test_passed else "Not found",
+            "passed": test_passed
+        })
+        if not test_passed:
+            all_passed = False
+
+        # Test 3: Get reservation status (should be pending)
+        print("\n3. Checking status via admin service...")
+        status_info = admin_service.get_reservation_status(res_id)
+        test_passed = status_info is not None and status_info["status"] == "pending"
+        status = "✓" if test_passed else "✗"
+        print(f"   {status} Status: {status_info.get('status', 'N/A') if status_info else 'None'}")
+        test_cases.append({
+            "name": "Status Check (Pending)",
+            "expected": "pending",
+            "result": status_info.get("status", "N/A") if status_info else "None",
+            "passed": test_passed
+        })
+        if not test_passed:
+            all_passed = False
+
+        # Test 4: Approve the reservation
+        print("\n4. Admin approving reservation...")
+        result = admin_service.approve_reservation(res_id, "TestAdmin", "Test approval")
+        test_passed = result["success"]
+        status = "✓" if test_passed else "✗"
+        print(f"   {status} {result['message']}")
+        test_cases.append({
+            "name": "Approve Reservation",
+            "expected": "Success",
+            "result": "Success" if test_passed else result.get("message", "Failed"),
+            "passed": test_passed
+        })
+        if not test_passed:
+            all_passed = False
+
+        # Test 5: Verify status is now confirmed
+        print("\n5. Verifying approved status...")
+        status_info = admin_service.get_reservation_status(res_id)
+        test_passed = status_info is not None and status_info["status"] == "confirmed"
+        status = "✓" if test_passed else "✗"
+        print(f"   {status} Status: {status_info.get('status', 'N/A') if status_info else 'None'}")
+        test_cases.append({
+            "name": "Status Check (Confirmed)",
+            "expected": "confirmed",
+            "result": status_info.get("status", "N/A") if status_info else "None",
+            "passed": test_passed
+        })
+        if not test_passed:
+            all_passed = False
+
+        # Test 6: Create another reservation for rejection test
+        print("\n6. Creating second reservation for rejection test...")
+        res_id_2 = f"RES_TEST_{uuid.uuid4().hex[:6].upper()}"
+        success = db.create_reservation(
+            res_id=res_id_2,
+            user_name="Jane",
+            user_surname="Smith",
+            car_number="XYZ-789",
+            parking_id="test_parking",
+            start_time=start_time,
+            end_time=end_time,
+        )
+        status = "✓" if success else "✗"
+        print(f"   {status} Reservation {res_id_2} created")
+        test_cases.append({
+            "name": "Create Second Reservation",
+            "expected": "Success",
+            "result": "Success" if success else "Failed",
+            "passed": success
+        })
+        if not success:
+            all_passed = False
+
+        # Test 7: Reject the second reservation
+        print("\n7. Admin rejecting reservation...")
+        result = admin_service.reject_reservation(res_id_2, "TestAdmin", "Test rejection reason")
+        test_passed = result["success"]
+        status = "✓" if test_passed else "✗"
+        print(f"   {status} {result['message']}")
+        test_cases.append({
+            "name": "Reject Reservation",
+            "expected": "Success",
+            "result": "Success" if test_passed else result.get("message", "Failed"),
+            "passed": test_passed
+        })
+        if not test_passed:
+            all_passed = False
+
+        # Test 8: Verify rejection status and reason
+        print("\n8. Verifying rejected status...")
+        status_info = admin_service.get_reservation_status(res_id_2)
+        test_passed = (
+            status_info is not None and
+            status_info["status"] == "rejected" and
+            status_info.get("rejection_reason") == "Test rejection reason"
+        )
+        status = "✓" if test_passed else "✗"
+        if status_info:
+            print(f"   {status} Status: {status_info.get('status', 'N/A')}")
+            print(f"   {status} Reason: {status_info.get('rejection_reason', 'N/A')}")
+        test_cases.append({
+            "name": "Status Check (Rejected)",
+            "expected": "rejected + reason",
+            "result": f"{status_info.get('status', 'N/A')}" if status_info else "None",
+            "passed": test_passed
+        })
+        if not test_passed:
+            all_passed = False
+
+        # Cleanup
+        db.close()
+        if os.path.exists(test_db_path):
+            os.remove(test_db_path)
+
+        # Summary
+        print("\n" + "-" * 80)
+        passed_count = sum(1 for tc in test_cases if tc["passed"])
+        print(f"Admin Flow Tests: {passed_count}/{len(test_cases)} passed")
+
+        details = {
+            "metrics": {
+                "Tests Passed": passed_count,
+                "Total Tests": len(test_cases),
+                "Pass Rate (%)": (passed_count / len(test_cases)) * 100
+            },
+            "test_cases": test_cases
+        }
+
+        return all_passed, details
+
+    except Exception as e:
+        print(f"\n✗ Admin flow test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, {"notes": f"Error: {str(e)}"}
+
+
+# ============================================================================
+# 10. DATA ARCHITECTURE TEST
 # ============================================================================
 
 
@@ -1126,7 +1339,8 @@ def main(generate_report: bool = True):
         ("Components", test_component_initialization),
         ("Hybrid Retrieval", test_hybrid_retrieval),
         ("E2E Workflow", test_end_to_end_workflow),
-        ("Agent Routing", test_agent_routing),  # NEW: Tests ReAct agent tool selection
+        ("Agent Routing", test_agent_routing),
+        ("Admin Flow", test_admin_flow),  # Human-in-the-loop approval
         ("Data Architecture", test_data_architecture),
     ]
 

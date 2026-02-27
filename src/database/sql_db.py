@@ -48,9 +48,12 @@ class Reservation(Base):
     parking_id = Column(String, nullable=False)
     start_time = Column(DateTime, nullable=False)
     end_time = Column(DateTime, nullable=False)
-    status = Column(String, default="pending")  # pending, confirmed, completed, cancelled
+    status = Column(String, default="pending")  # pending, confirmed, completed, cancelled, rejected
     created_at = Column(DateTime, default=datetime.utcnow)
-    approved_by_admin = Column(String, nullable=True)  # Admin name who approved
+    approved_by_admin = Column(String, nullable=True)  # Admin name who approved/rejected
+    rejection_reason = Column(String, nullable=True)  # Reason for rejection
+    reviewed_at = Column(DateTime, nullable=True)  # When admin reviewed
+    admin_notes = Column(String, nullable=True)  # Optional admin notes
 
 
 class ParkingDatabase:
@@ -243,18 +246,23 @@ class ParkingDatabase:
                     "start_time": res.start_time,
                     "end_time": res.end_time,
                     "status": res.status,
+                    "created_at": res.created_at,
                     "approved_by_admin": res.approved_by_admin,
+                    "rejection_reason": res.rejection_reason,
+                    "reviewed_at": res.reviewed_at,
+                    "admin_notes": res.admin_notes,
                 }
             return None
         finally:
             session.close()
 
-    def approve_reservation(self, res_id: str, admin_name: str) -> bool:
+    def approve_reservation(self, res_id: str, admin_name: str, notes: str = None) -> bool:
         """Approve a reservation (admin action).
 
         Args:
             res_id: Reservation ID.
             admin_name: Name of admin approving.
+            notes: Optional admin notes.
 
         Returns:
             True if successful.
@@ -265,14 +273,140 @@ class ParkingDatabase:
             if res:
                 res.status = "confirmed"
                 res.approved_by_admin = admin_name
+                res.reviewed_at = datetime.utcnow()
+                if notes:
+                    res.admin_notes = notes
                 session.commit()
-                logger.info(f"Approved reservation: {res_id}")
+                logger.info(f"Approved reservation: {res_id} by {admin_name}")
                 return True
             return False
         except Exception as e:
             logger.error(f"Failed to approve reservation: {e}")
             session.rollback()
             return False
+        finally:
+            session.close()
+
+    def reject_reservation(self, res_id: str, admin_name: str, reason: str) -> bool:
+        """Reject a reservation (admin action).
+
+        Args:
+            res_id: Reservation ID.
+            admin_name: Name of admin rejecting.
+            reason: Reason for rejection.
+
+        Returns:
+            True if successful.
+        """
+        session = self.get_session()
+        try:
+            res = session.query(Reservation).filter_by(id=res_id).first()
+            if res:
+                res.status = "rejected"
+                res.approved_by_admin = admin_name
+                res.rejection_reason = reason
+                res.reviewed_at = datetime.utcnow()
+                session.commit()
+                logger.info(f"Rejected reservation: {res_id} by {admin_name}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Failed to reject reservation: {e}")
+            session.rollback()
+            return False
+        finally:
+            session.close()
+
+    def get_pending_reservations(self) -> list:
+        """Get all pending reservations for admin review.
+
+        Returns:
+            List of pending reservation dictionaries.
+        """
+        session = self.get_session()
+        try:
+            reservations = session.query(Reservation).filter_by(status="pending").all()
+            return [
+                {
+                    "id": res.id,
+                    "user_name": res.user_name,
+                    "user_surname": res.user_surname,
+                    "car_number": res.car_number,
+                    "parking_id": res.parking_id,
+                    "start_time": res.start_time,
+                    "end_time": res.end_time,
+                    "created_at": res.created_at,
+                }
+                for res in reservations
+            ]
+        finally:
+            session.close()
+
+    def get_reservations_by_user(self, user_name: str, user_surname: str) -> list:
+        """Get all reservations for a specific user.
+
+        Args:
+            user_name: User's first name.
+            user_surname: User's last name.
+
+        Returns:
+            List of reservation dictionaries.
+        """
+        session = self.get_session()
+        try:
+            reservations = (
+                session.query(Reservation)
+                .filter_by(user_name=user_name, user_surname=user_surname)
+                .order_by(Reservation.created_at.desc())
+                .all()
+            )
+            return [
+                {
+                    "id": res.id,
+                    "parking_id": res.parking_id,
+                    "start_time": res.start_time,
+                    "end_time": res.end_time,
+                    "status": res.status,
+                    "created_at": res.created_at,
+                    "rejection_reason": res.rejection_reason,
+                }
+                for res in reservations
+            ]
+        finally:
+            session.close()
+
+    def get_reviewed_reservations(self, limit: int = 20) -> list:
+        """Get recently reviewed (approved/rejected) reservations.
+
+        Args:
+            limit: Maximum number of reservations to return.
+
+        Returns:
+            List of reviewed reservation dictionaries.
+        """
+        session = self.get_session()
+        try:
+            reservations = (
+                session.query(Reservation)
+                .filter(Reservation.status.in_(["confirmed", "rejected"]))
+                .filter(Reservation.reviewed_at.isnot(None))
+                .order_by(Reservation.reviewed_at.desc())
+                .limit(limit)
+                .all()
+            )
+            return [
+                {
+                    "id": res.id,
+                    "user_name": res.user_name,
+                    "user_surname": res.user_surname,
+                    "parking_id": res.parking_id,
+                    "status": res.status,
+                    "reviewed_at": res.reviewed_at,
+                    "approved_by_admin": res.approved_by_admin,
+                    "rejection_reason": res.rejection_reason,
+                }
+                for res in reservations
+            ]
         finally:
             session.close()
 

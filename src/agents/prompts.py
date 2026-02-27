@@ -70,6 +70,24 @@ CONVERSATION HISTORY:
 Generate a helpful response:"""
 
 
+# Status check response prompt
+STATUS_CHECK_PROMPT = """You are a parking assistant helping a user check their reservation status.
+
+Format the reservation status information into a clear, friendly response.
+
+RESERVATION STATUS DATA:
+{status_data}
+
+RULES:
+1. If status is "confirmed" (approved), congratulate them and show details
+2. If status is "rejected", apologize and show the rejection reason
+3. If status is "pending", let them know it's still being reviewed
+4. Always include the reservation ID and parking location
+5. Be helpful and suggest next steps if appropriate
+
+Generate a response:"""
+
+
 # Reservation start prompt
 RESERVATION_START_PROMPT = """The user wants to make a parking reservation.
 

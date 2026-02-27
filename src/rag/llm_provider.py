@@ -36,15 +36,29 @@ def create_llm(temperature: float = 0.3) -> Any:
 
 
 def _create_ollama_llm(temperature: float) -> Any:
-    """Create Ollama LLM instance."""
+    """Create Ollama LLM instance.
+
+    Uses ChatOllama for tool binding support (required by LangGraph agents).
+    """
     try:
+        from langchain_ollama import ChatOllama
+        llm = ChatOllama(
+            base_url=config.OLLAMA_HOST,
+            model=config.OLLAMA_MODEL,
+            temperature=temperature,
+        )
+        logger.info(f"✓ Ollama LLM initialized (ChatOllama): {config.OLLAMA_MODEL}")
+        return llm
+    except ImportError:
+        # Fallback to legacy Ollama if langchain_ollama not available
+        logger.warning("langchain_ollama not available, using legacy Ollama (no tool support)")
         from langchain_community.llms import Ollama
         llm = Ollama(
             base_url=config.OLLAMA_HOST,
             model=config.OLLAMA_MODEL,
             temperature=temperature,
         )
-        logger.info(f"✓ Ollama LLM initialized: {config.OLLAMA_MODEL}")
+        logger.info(f"✓ Ollama LLM initialized (legacy): {config.OLLAMA_MODEL}")
         return llm
     except Exception as e:
         logger.error(f"Failed to initialize Ollama: {e}")

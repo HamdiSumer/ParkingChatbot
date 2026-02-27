@@ -54,6 +54,10 @@ class ConversationState:
     pending_admin_review: bool = False
     admin_decision: Optional[str] = None
 
+    # Status check
+    checking_status: bool = False
+    status_reservation_id: Optional[str] = None
+
     # Safety/Guard rails
     safety_issue_detected: bool = False
     safety_issue_details: str = ""
