@@ -96,6 +96,8 @@ Access the dashboard from: 0.0.0.0:8001/dashboard
 - 🔒 **Security** - PII detection, input sanitization, access logging, and sensitive data filtering
 - 📈 **Evaluation** - Comprehensive RAG metrics (RAGAS framework) + auto-reports
 - 🔄 **Flexible LLMs** - Ollama, OpenAI, Gemini, or Claude
+- ⚡ **Load Testing** - Concurrent user simulation, admin operations stress testing, MCP server performance
+- 🔗 **Pipeline Integration** - Full end-to-end testing from user query to data recording
 
 ---
 
@@ -121,22 +123,65 @@ This means greetings don't trigger expensive RAG retrieval, and real-time querie
 
 ## Testing
 
-Run comprehensive tests including RAGAS metrics, retrieval quality, and end-to-end workflows:
+Run comprehensive tests including RAGAS metrics, load tests, retrieval quality, and end-to-end workflows:
 
 ```bash
 uv run python test_rag.py              # Run tests + generate markdown report
 uv run python test_rag.py --no-report  # Run tests without report
 ```
 
-Tests included:
-- Guardrails (security & sensitive data detection)
-- RAG Metrics (faithfulness, relevance, context precision)
-- Recall@K (retrieval ranking quality)
-- Hybrid Retrieval (SQL Agent + Vector DB)
-- Component initialization (embeddings, vector DB, LLM)
-- End-to-end workflow
-- **Agent Routing** (ReAct agent tool selection - greetings vs retrieval)
-- Data architecture verification
+### Test Categories
+
+| Category | Tests | Description |
+|----------|-------|-------------|
+| **Security** | Guardrails | PII detection, SQL injection prevention, input sanitization |
+| **RAG Quality** | RAGAS Metrics | Faithfulness, answer relevance, context precision |
+| **Retrieval** | Recall@K, Hybrid | Vector DB + SQL Agent ranking quality |
+| **Agent** | Routing | ReAct agent tool selection (greetings vs retrieval) |
+| **Admin** | HITL Flow | Human-in-the-loop approval/rejection workflow |
+| **Load Tests** | Concurrent Users | 5 concurrent users, 3 queries each |
+| **Load Tests** | Admin Operations | 5 concurrent admins, 4 operations each |
+| **Load Tests** | MCP Server | 5 concurrent writers, 4 operations each |
+| **MCP Server** | Functional | Write, read, file info, input validation |
+| **Integration** | Full Pipeline | End-to-end: Query → RAG → Admin → MCP |
+
+### Load Testing
+
+The test suite includes comprehensive load tests to evaluate system performance under concurrent access:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           LOAD TEST METRICS                                  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  Chatbot Load Test                                                           │
+│  ├─ Concurrent Users: 5                                                      │
+│  ├─ Queries per User: 3                                                      │
+│  ├─ Metrics: Success Rate, Avg/Min/Max/P95 Response Time                     │
+│  └─ Pass Criteria: >80% success, <30s avg response                           │
+│                                                                              │
+│  Admin Load Test                                                             │
+│  ├─ Concurrent Admins: 5                                                     │
+│  ├─ Operations: Create, List, Approve, Reject                                │
+│  └─ Pass Criteria: >80% success rate                                         │
+│                                                                              │
+│  MCP Server Load Test                                                        │
+│  ├─ Concurrent Writers: 5                                                    │
+│  ├─ Operations: Write, Read, File Info                                       │
+│  └─ Pass Criteria: >80% success rate                                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Full Pipeline Integration Test
+
+Tests the complete system workflow:
+
+```
+User Query → Safety Check → RAG Retrieval → Response
+     ↓
+Reservation Request → Data Collection → Admin Queue
+     ↓
+Admin Decision → Status Update → MCP Recording
+```
 
 **Reports** are auto-saved to `reports/` folder as:
 `{provider}_{model}_test_results_{timestamp}.md`
@@ -170,7 +215,7 @@ src/
 ├── app.py           # Main application logic
 └── cli.py           # Interactive command-line interface
 
-test_rag.py          # Comprehensive test suite + report generation
+test_rag.py          # Comprehensive test suite (14 tests) + report generation
 reports/             # Auto-generated test reports (markdown)
 main.py              # Entry point
 ```

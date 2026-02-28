@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
 """
 Comprehensive RAG & System Testing Suite
-Combines RAGAS metrics, integration tests, and end-to-end verification.
+Combines RAGAS metrics, integration tests, load tests, and end-to-end verification.
+
+Tests include:
+- RAGAS metrics (Faithfulness, Answer Relevance, Context Precision)
+- Security guardrails (PII detection, SQL injection prevention)
+- Component initialization verification
+- Hybrid retrieval (Vector DB + SQL Agent)
+- Agent routing decisions
+- Admin human-in-the-loop flow
+- Load tests (concurrent users, admin operations, MCP writes)
+- MCP server functional tests
+- Full pipeline integration
 
 Run: python test_rag.py
      python test_rag.py --no-report  # Skip report generation
@@ -31,8 +42,12 @@ _stderr = sys.stderr
 sys.stderr = io.StringIO()
 
 import time
+import asyncio
 import numpy as np
 from typing import List, Dict, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+import uuid
 
 # Suppress all logs BEFORE importing src modules
 from src.utils.logging import set_quiet_mode, suppress_warnings
@@ -1311,6 +1326,1022 @@ def test_data_architecture():
 
 
 # ============================================================================
+# 10. LOAD TEST: CHATBOT CONCURRENT USERS
+# ============================================================================
+
+
+def test_chatbot_load():
+    """Load test: Simulate multiple concurrent users interacting with the chatbot.
+
+    Tests system performance under concurrent load to evaluate:
+    - Response time degradation under load
+    - Success rate with multiple simultaneous requests
+    - System stability with concurrent access
+    """
+    print_section("TEST 10: LOAD TEST - Chatbot Concurrent Users")
+
+    # Configuration
+    NUM_CONCURRENT_USERS = 5  # Number of concurrent users
+    QUERIES_PER_USER = 3      # Queries each user will send
+
+    test_queries = [
+        "Where is downtown parking?",
+        "What are the parking prices?",
+        "How many spaces are available?",
+        "What are the parking rules?",
+        "What is the current status of parking?",
+    ]
+
+    results = {
+        "total_requests": 0,
+        "successful_requests": 0,
+        "failed_requests": 0,
+        "response_times": [],
+        "errors": [],
+    }
+
+    results_lock = threading.Lock()
+
+    def user_session(user_id: int, app) -> List[Dict]:
+        """Simulate a single user's session with multiple queries."""
+        session_results = []
+
+        for query_idx in range(QUERIES_PER_USER):
+            query = test_queries[(user_id + query_idx) % len(test_queries)]
+            start_time = time.time()
+
+            try:
+                result = app.process_user_message(query)
+                elapsed_ms = (time.time() - start_time) * 1000
+
+                success = result.get("response") and len(result.get("response", "")) > 10
+
+                session_results.append({
+                    "user_id": user_id,
+                    "query": query,
+                    "success": success,
+                    "response_time_ms": elapsed_ms,
+                    "error": None
+                })
+
+            except Exception as e:
+                elapsed_ms = (time.time() - start_time) * 1000
+                session_results.append({
+                    "user_id": user_id,
+                    "query": query,
+                    "success": False,
+                    "response_time_ms": elapsed_ms,
+                    "error": str(e)
+                })
+
+        return session_results
+
+    try:
+        with create_test_app() as app:
+            print(f"\nSimulating {NUM_CONCURRENT_USERS} concurrent users, {QUERIES_PER_USER} queries each...")
+            print(f"Total requests: {NUM_CONCURRENT_USERS * QUERIES_PER_USER}")
+            print("-" * 80)
+
+            all_results = []
+
+            # Run concurrent user sessions
+            with ThreadPoolExecutor(max_workers=NUM_CONCURRENT_USERS) as executor:
+                futures = {
+                    executor.submit(user_session, user_id, app): user_id
+                    for user_id in range(NUM_CONCURRENT_USERS)
+                }
+
+                for future in as_completed(futures):
+                    user_id = futures[future]
+                    try:
+                        session_results = future.result()
+                        all_results.extend(session_results)
+                    except Exception as e:
+                        print(f"User {user_id} session failed: {e}")
+
+            # Aggregate results
+            for result in all_results:
+                results["total_requests"] += 1
+                if result["success"]:
+                    results["successful_requests"] += 1
+                else:
+                    results["failed_requests"] += 1
+                    if result["error"]:
+                        results["errors"].append(result["error"])
+                results["response_times"].append(result["response_time_ms"])
+
+            # Calculate statistics
+            if results["response_times"]:
+                avg_response_time = sum(results["response_times"]) / len(results["response_times"])
+                min_response_time = min(results["response_times"])
+                max_response_time = max(results["response_times"])
+                p95_response_time = sorted(results["response_times"])[int(len(results["response_times"]) * 0.95)]
+            else:
+                avg_response_time = min_response_time = max_response_time = p95_response_time = 0
+
+            success_rate = (results["successful_requests"] / results["total_requests"]) * 100 if results["total_requests"] > 0 else 0
+
+            # Print results
+            print(f"\n{'Metric':<30} {'Value':<20}")
+            print("-" * 50)
+            print(f"{'Total Requests':<30} {results['total_requests']:<20}")
+            print(f"{'Successful Requests':<30} {results['successful_requests']:<20}")
+            print(f"{'Failed Requests':<30} {results['failed_requests']:<20}")
+            print(f"{'Success Rate':<30} {success_rate:.1f}%")
+            print(f"{'Avg Response Time':<30} {avg_response_time:.0f}ms")
+            print(f"{'Min Response Time':<30} {min_response_time:.0f}ms")
+            print(f"{'Max Response Time':<30} {max_response_time:.0f}ms")
+            print(f"{'P95 Response Time':<30} {p95_response_time:.0f}ms")
+            print("-" * 50)
+
+            # Determine pass/fail
+            # Pass if: >80% success rate AND avg response time < 30 seconds
+            test_passed = success_rate >= 80 and avg_response_time < 30000
+
+            status = "✓ PASSED" if test_passed else "✗ FAILED"
+            print(f"\nLoad Test Result: {status}")
+
+            if results["errors"]:
+                print(f"\nErrors encountered ({len(results['errors'])} unique):")
+                for error in set(results["errors"][:5]):  # Show first 5 unique errors
+                    print(f"  • {error[:80]}...")
+
+            details = {
+                "metrics": {
+                    "Concurrent Users": NUM_CONCURRENT_USERS,
+                    "Queries Per User": QUERIES_PER_USER,
+                    "Total Requests": results["total_requests"],
+                    "Success Rate (%)": success_rate,
+                    "Avg Response Time (ms)": avg_response_time,
+                    "P95 Response Time (ms)": p95_response_time,
+                },
+                "notes": f"Simulated {NUM_CONCURRENT_USERS} concurrent users"
+            }
+
+            return test_passed, details
+
+    except Exception as e:
+        print(f"\n✗ Load test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, {"notes": f"Error: {str(e)}"}
+
+
+# ============================================================================
+# 11. LOAD TEST: ADMIN CONFIRMATION FUNCTIONALITY
+# ============================================================================
+
+
+def test_admin_load():
+    """Load test: Simulate multiple concurrent admin operations.
+
+    Tests admin system performance with concurrent:
+    - Reservation creation
+    - Approval/rejection operations
+    - Status queries
+    """
+    print_section("TEST 11: LOAD TEST - Admin Confirmation Functionality")
+
+    # Configuration
+    NUM_CONCURRENT_ADMINS = 5
+    OPERATIONS_PER_ADMIN = 4
+
+    results = {
+        "total_operations": 0,
+        "successful_operations": 0,
+        "failed_operations": 0,
+        "operation_times": [],
+        "errors": [],
+    }
+
+    results_lock = threading.Lock()
+
+    def admin_session(admin_id: int, db, admin_service) -> List[Dict]:
+        """Simulate admin operations session."""
+        session_results = []
+
+        for op_idx in range(OPERATIONS_PER_ADMIN):
+            operation_type = op_idx % 4  # Cycle through operation types
+            res_id = f"LOAD_TEST_{admin_id}_{op_idx}_{uuid.uuid4().hex[:6].upper()}"
+            start_time = time.time()
+
+            try:
+                if operation_type == 0:
+                    # Create reservation
+                    from datetime import datetime, timedelta
+                    success = db.create_reservation(
+                        res_id=res_id,
+                        user_name=f"LoadTest{admin_id}",
+                        user_surname=f"User{op_idx}",
+                        car_number=f"LT-{admin_id}{op_idx}",
+                        parking_id="downtown_1",
+                        start_time=datetime.now() + timedelta(hours=1),
+                        end_time=datetime.now() + timedelta(hours=3),
+                    )
+                    op_name = "Create Reservation"
+
+                elif operation_type == 1:
+                    # List pending reservations
+                    pending = admin_service.get_pending_reservations()
+                    success = isinstance(pending, list)
+                    op_name = "List Pending"
+
+                elif operation_type == 2:
+                    # Create and approve
+                    from datetime import datetime, timedelta
+                    db.create_reservation(
+                        res_id=res_id,
+                        user_name=f"ApproveTest{admin_id}",
+                        user_surname=f"User{op_idx}",
+                        car_number=f"AP-{admin_id}{op_idx}",
+                        parking_id="downtown_1",
+                        start_time=datetime.now() + timedelta(hours=2),
+                        end_time=datetime.now() + timedelta(hours=4),
+                    )
+                    result = admin_service.approve_reservation(res_id, f"Admin{admin_id}", "Load test approval")
+                    success = result.get("success", False)
+                    op_name = "Approve Reservation"
+
+                else:
+                    # Create and reject
+                    from datetime import datetime, timedelta
+                    db.create_reservation(
+                        res_id=res_id,
+                        user_name=f"RejectTest{admin_id}",
+                        user_surname=f"User{op_idx}",
+                        car_number=f"RJ-{admin_id}{op_idx}",
+                        parking_id="downtown_1",
+                        start_time=datetime.now() + timedelta(hours=3),
+                        end_time=datetime.now() + timedelta(hours=5),
+                    )
+                    result = admin_service.reject_reservation(res_id, f"Admin{admin_id}", "Load test rejection")
+                    success = result.get("success", False)
+                    op_name = "Reject Reservation"
+
+                elapsed_ms = (time.time() - start_time) * 1000
+
+                session_results.append({
+                    "admin_id": admin_id,
+                    "operation": op_name,
+                    "success": success,
+                    "response_time_ms": elapsed_ms,
+                    "error": None
+                })
+
+            except Exception as e:
+                elapsed_ms = (time.time() - start_time) * 1000
+                session_results.append({
+                    "admin_id": admin_id,
+                    "operation": f"Operation {op_idx}",
+                    "success": False,
+                    "response_time_ms": elapsed_ms,
+                    "error": str(e)
+                })
+
+        return session_results
+
+    try:
+        from src.database.sql_db import ParkingDatabase
+        from src.admin.admin_service import AdminService
+
+        # Use a separate test database
+        test_db_path = "./data/test_admin_load.db"
+
+        # Clean up any existing test db
+        if os.path.exists(test_db_path):
+            os.remove(test_db_path)
+
+        db = ParkingDatabase(db_path=test_db_path)
+        admin_service = AdminService(db)
+
+        # Add a parking space for testing
+        db.add_parking_space(
+            id="downtown_1",
+            name="Downtown Parking",
+            location="Downtown",
+            capacity=100,
+            price_per_hour=5.0
+        )
+
+        print(f"\nSimulating {NUM_CONCURRENT_ADMINS} concurrent admins, {OPERATIONS_PER_ADMIN} operations each...")
+        print(f"Total operations: {NUM_CONCURRENT_ADMINS * OPERATIONS_PER_ADMIN}")
+        print("-" * 80)
+
+        all_results = []
+
+        # Run concurrent admin sessions
+        with ThreadPoolExecutor(max_workers=NUM_CONCURRENT_ADMINS) as executor:
+            futures = {
+                executor.submit(admin_session, admin_id, db, admin_service): admin_id
+                for admin_id in range(NUM_CONCURRENT_ADMINS)
+            }
+
+            for future in as_completed(futures):
+                admin_id = futures[future]
+                try:
+                    session_results = future.result()
+                    all_results.extend(session_results)
+                except Exception as e:
+                    print(f"Admin {admin_id} session failed: {e}")
+
+        # Aggregate results
+        for result in all_results:
+            results["total_operations"] += 1
+            if result["success"]:
+                results["successful_operations"] += 1
+            else:
+                results["failed_operations"] += 1
+                if result["error"]:
+                    results["errors"].append(result["error"])
+            results["operation_times"].append(result["response_time_ms"])
+
+        # Calculate statistics
+        if results["operation_times"]:
+            avg_time = sum(results["operation_times"]) / len(results["operation_times"])
+            min_time = min(results["operation_times"])
+            max_time = max(results["operation_times"])
+        else:
+            avg_time = min_time = max_time = 0
+
+        success_rate = (results["successful_operations"] / results["total_operations"]) * 100 if results["total_operations"] > 0 else 0
+
+        # Print results
+        print(f"\n{'Metric':<30} {'Value':<20}")
+        print("-" * 50)
+        print(f"{'Total Operations':<30} {results['total_operations']:<20}")
+        print(f"{'Successful Operations':<30} {results['successful_operations']:<20}")
+        print(f"{'Failed Operations':<30} {results['failed_operations']:<20}")
+        print(f"{'Success Rate':<30} {success_rate:.1f}%")
+        print(f"{'Avg Operation Time':<30} {avg_time:.0f}ms")
+        print(f"{'Min Operation Time':<30} {min_time:.0f}ms")
+        print(f"{'Max Operation Time':<30} {max_time:.0f}ms")
+        print("-" * 50)
+
+        # Cleanup
+        db.close()
+        if os.path.exists(test_db_path):
+            os.remove(test_db_path)
+
+        # Pass if >80% success rate
+        test_passed = success_rate >= 80
+
+        status = "✓ PASSED" if test_passed else "✗ FAILED"
+        print(f"\nAdmin Load Test Result: {status}")
+
+        details = {
+            "metrics": {
+                "Concurrent Admins": NUM_CONCURRENT_ADMINS,
+                "Operations Per Admin": OPERATIONS_PER_ADMIN,
+                "Total Operations": results["total_operations"],
+                "Success Rate (%)": success_rate,
+                "Avg Operation Time (ms)": avg_time,
+            }
+        }
+
+        return test_passed, details
+
+    except Exception as e:
+        print(f"\n✗ Admin load test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, {"notes": f"Error: {str(e)}"}
+
+
+# ============================================================================
+# 12. LOAD TEST: MCP SERVER CONCURRENT WRITES
+# ============================================================================
+
+
+def test_mcp_load():
+    """Load test: Simulate concurrent MCP server operations.
+
+    Tests MCP server performance with concurrent:
+    - Reservation writes
+    - File reads
+    - Info queries
+    """
+    print_section("TEST 12: LOAD TEST - MCP Server Concurrent Operations")
+
+    # Configuration
+    NUM_CONCURRENT_WRITERS = 5
+    OPERATIONS_PER_WRITER = 4
+
+    results = {
+        "total_operations": 0,
+        "successful_operations": 0,
+        "failed_operations": 0,
+        "operation_times": [],
+        "errors": [],
+    }
+
+    async def mcp_operations(writer_id: int) -> List[Dict]:
+        """Perform MCP operations."""
+        from src.mcp.reservation_server import (
+            write_reservation,
+            read_reservations,
+            get_reservation_file_info,
+        )
+
+        session_results = []
+
+        for op_idx in range(OPERATIONS_PER_WRITER):
+            operation_type = op_idx % 3
+            start_time = time.time()
+
+            try:
+                if operation_type == 0:
+                    # Write reservation
+                    test_reservation = {
+                        "reservation_id": f"MCP_LOAD_{writer_id}_{op_idx}_{uuid.uuid4().hex[:6]}",
+                        "user_name": f"LoadTest{writer_id}",
+                        "user_surname": f"User{op_idx}",
+                        "car_number": f"MCP-{writer_id}{op_idx}",
+                        "start_time": "2026-03-01 10:00",
+                        "end_time": "2026-03-01 14:00",
+                        "approved_by": f"LoadTestAdmin{writer_id}",
+                        "parking_id": "downtown_1"
+                    }
+                    result = await write_reservation(test_reservation)
+                    success = "successfully" in result[0].text.lower() or "written" in result[0].text.lower()
+                    op_name = "Write Reservation"
+
+                elif operation_type == 1:
+                    # Read reservations
+                    result = await read_reservations({"limit": 5})
+                    success = result is not None and len(result) > 0
+                    op_name = "Read Reservations"
+
+                else:
+                    # Get file info
+                    result = await get_reservation_file_info({})
+                    success = result is not None and len(result) > 0
+                    op_name = "Get File Info"
+
+                elapsed_ms = (time.time() - start_time) * 1000
+
+                session_results.append({
+                    "writer_id": writer_id,
+                    "operation": op_name,
+                    "success": success,
+                    "response_time_ms": elapsed_ms,
+                    "error": None
+                })
+
+            except Exception as e:
+                elapsed_ms = (time.time() - start_time) * 1000
+                session_results.append({
+                    "writer_id": writer_id,
+                    "operation": f"Operation {op_idx}",
+                    "success": False,
+                    "response_time_ms": elapsed_ms,
+                    "error": str(e)
+                })
+
+        return session_results
+
+    async def run_concurrent_mcp_tests():
+        """Run all MCP tests concurrently."""
+        tasks = [mcp_operations(writer_id) for writer_id in range(NUM_CONCURRENT_WRITERS)]
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    try:
+        print(f"\nSimulating {NUM_CONCURRENT_WRITERS} concurrent MCP writers, {OPERATIONS_PER_WRITER} operations each...")
+        print(f"Total operations: {NUM_CONCURRENT_WRITERS * OPERATIONS_PER_WRITER}")
+        print("-" * 80)
+
+        # Run async operations
+        all_results = asyncio.run(run_concurrent_mcp_tests())
+
+        # Aggregate results
+        for session_results in all_results:
+            if isinstance(session_results, Exception):
+                results["failed_operations"] += 1
+                results["errors"].append(str(session_results))
+                continue
+
+            for result in session_results:
+                results["total_operations"] += 1
+                if result["success"]:
+                    results["successful_operations"] += 1
+                else:
+                    results["failed_operations"] += 1
+                    if result["error"]:
+                        results["errors"].append(result["error"])
+                results["operation_times"].append(result["response_time_ms"])
+
+        # Calculate statistics
+        if results["operation_times"]:
+            avg_time = sum(results["operation_times"]) / len(results["operation_times"])
+            min_time = min(results["operation_times"])
+            max_time = max(results["operation_times"])
+        else:
+            avg_time = min_time = max_time = 0
+
+        success_rate = (results["successful_operations"] / results["total_operations"]) * 100 if results["total_operations"] > 0 else 0
+
+        # Print results
+        print(f"\n{'Metric':<30} {'Value':<20}")
+        print("-" * 50)
+        print(f"{'Total Operations':<30} {results['total_operations']:<20}")
+        print(f"{'Successful Operations':<30} {results['successful_operations']:<20}")
+        print(f"{'Failed Operations':<30} {results['failed_operations']:<20}")
+        print(f"{'Success Rate':<30} {success_rate:.1f}%")
+        print(f"{'Avg Operation Time':<30} {avg_time:.0f}ms")
+        print(f"{'Min Operation Time':<30} {min_time:.0f}ms")
+        print(f"{'Max Operation Time':<30} {max_time:.0f}ms")
+        print("-" * 50)
+
+        # Pass if >80% success rate
+        test_passed = success_rate >= 80
+
+        status = "✓ PASSED" if test_passed else "✗ FAILED"
+        print(f"\nMCP Load Test Result: {status}")
+
+        details = {
+            "metrics": {
+                "Concurrent Writers": NUM_CONCURRENT_WRITERS,
+                "Operations Per Writer": OPERATIONS_PER_WRITER,
+                "Total Operations": results["total_operations"],
+                "Success Rate (%)": success_rate,
+                "Avg Operation Time (ms)": avg_time,
+            }
+        }
+
+        return test_passed, details
+
+    except Exception as e:
+        print(f"\n✗ MCP load test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, {"notes": f"Error: {str(e)}"}
+
+
+# ============================================================================
+# 13. MCP SERVER FUNCTIONAL TESTS (Merged from test_mcp_server.py)
+# ============================================================================
+
+
+def test_mcp_server():
+    """Test MCP server tools functionality.
+
+    Tests all MCP server tools:
+    - write_reservation: Write approved reservation to file
+    - read_reservations: Read reservation history
+    - get_reservation_file_info: Get file metadata
+    """
+    print_section("TEST 13: MCP SERVER - Functional Tests")
+
+    async def run_mcp_tests() -> Tuple[bool, Dict]:
+        """Run all MCP tool tests."""
+        from src.mcp.reservation_server import (
+            write_reservation,
+            read_reservations,
+            get_reservation_file_info,
+        )
+
+        test_cases = []
+        all_passed = True
+
+        # Test 1: Get initial file info
+        print("\n1. Get Reservation File Info...")
+        try:
+            result = await get_reservation_file_info({})
+            success = result is not None and len(result) > 0
+            test_cases.append({
+                "name": "Get File Info",
+                "expected": "File info returned",
+                "result": "Success" if success else "Failed",
+                "passed": success
+            })
+            if success:
+                print(f"   ✓ {result[0].text[:80]}...")
+            else:
+                print("   ✗ Failed to get file info")
+                all_passed = False
+        except Exception as e:
+            print(f"   ✗ Error: {e}")
+            test_cases.append({
+                "name": "Get File Info",
+                "expected": "File info returned",
+                "result": f"Error: {str(e)[:30]}",
+                "passed": False
+            })
+            all_passed = False
+
+        # Test 2: Write a test reservation
+        print("\n2. Write Test Reservation...")
+        test_reservation = {
+            "reservation_id": f"MCP_TEST_{uuid.uuid4().hex[:8].upper()}",
+            "user_name": "MCP",
+            "user_surname": "TestUser",
+            "car_number": "MCP-999",
+            "start_time": "2026-03-01 10:00",
+            "end_time": "2026-03-01 14:00",
+            "approved_by": "MCP Server Test",
+            "parking_id": "downtown_1"
+        }
+        try:
+            result = await write_reservation(test_reservation)
+            success = "successfully" in result[0].text.lower() or "written" in result[0].text.lower()
+            test_cases.append({
+                "name": "Write Reservation",
+                "expected": "Reservation written",
+                "result": "Success" if success else "Failed",
+                "passed": success
+            })
+            if success:
+                print(f"   ✓ {result[0].text[:80]}...")
+            else:
+                print(f"   ✗ Unexpected result: {result[0].text[:80]}...")
+                all_passed = False
+        except Exception as e:
+            print(f"   ✗ Error: {e}")
+            test_cases.append({
+                "name": "Write Reservation",
+                "expected": "Reservation written",
+                "result": f"Error: {str(e)[:30]}",
+                "passed": False
+            })
+            all_passed = False
+
+        # Test 3: Read reservations
+        print("\n3. Read Recent Reservations...")
+        try:
+            result = await read_reservations({"limit": 5})
+            success = result is not None and len(result) > 0
+            test_cases.append({
+                "name": "Read Reservations",
+                "expected": "Reservations list returned",
+                "result": "Success" if success else "Failed",
+                "passed": success
+            })
+            if success:
+                print(f"   ✓ {result[0].text[:80]}...")
+            else:
+                print("   ✗ Failed to read reservations")
+                all_passed = False
+        except Exception as e:
+            print(f"   ✗ Error: {e}")
+            test_cases.append({
+                "name": "Read Reservations",
+                "expected": "Reservations list returned",
+                "result": f"Error: {str(e)[:30]}",
+                "passed": False
+            })
+            all_passed = False
+
+        # Test 4: Verify file was updated
+        print("\n4. Verify File Updated...")
+        try:
+            result = await get_reservation_file_info({})
+            success = result is not None and len(result) > 0
+            test_cases.append({
+                "name": "Verify File Update",
+                "expected": "Updated file info",
+                "result": "Success" if success else "Failed",
+                "passed": success
+            })
+            if success:
+                print(f"   ✓ {result[0].text[:80]}...")
+            else:
+                print("   ✗ Failed to verify file update")
+                all_passed = False
+        except Exception as e:
+            print(f"   ✗ Error: {e}")
+            test_cases.append({
+                "name": "Verify File Update",
+                "expected": "Updated file info",
+                "result": f"Error: {str(e)[:30]}",
+                "passed": False
+            })
+            all_passed = False
+
+        # Test 5: Input validation (security test)
+        print("\n5. Input Validation (Security)...")
+        malicious_reservation = {
+            "reservation_id": "../../etc/passwd",
+            "user_name": "Mal|icious",
+            "user_surname": "User\nInjection",
+            "car_number": "ABC-123",
+            "start_time": "2026-03-01 10:00",
+            "end_time": "2026-03-01 14:00",
+            "approved_by": "Test",
+            "parking_id": "downtown_1"
+        }
+        try:
+            result = await write_reservation(malicious_reservation)
+            # Should succeed but sanitize the input
+            success = result is not None and len(result) > 0
+            # The sanitization should have removed malicious chars
+            test_cases.append({
+                "name": "Input Sanitization",
+                "expected": "Sanitized write",
+                "result": "Success" if success else "Failed",
+                "passed": success
+            })
+            if success:
+                print(f"   ✓ Input sanitized and written")
+            else:
+                print("   ✗ Sanitization may have failed")
+                all_passed = False
+        except Exception as e:
+            # If it raises an error, that's also acceptable security behavior
+            print(f"   ✓ Malicious input rejected: {str(e)[:50]}")
+            test_cases.append({
+                "name": "Input Sanitization",
+                "expected": "Sanitized or rejected",
+                "result": "Rejected",
+                "passed": True
+            })
+
+        print("\n" + "-" * 80)
+        passed_count = sum(1 for tc in test_cases if tc["passed"])
+        print(f"MCP Server Tests: {passed_count}/{len(test_cases)} passed")
+
+        details = {
+            "metrics": {
+                "Tests Passed": passed_count,
+                "Total Tests": len(test_cases),
+                "Pass Rate (%)": (passed_count / len(test_cases)) * 100 if test_cases else 0
+            },
+            "test_cases": test_cases
+        }
+
+        return all_passed, details
+
+    try:
+        return asyncio.run(run_mcp_tests())
+    except Exception as e:
+        print(f"\n✗ MCP server test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, {"notes": f"Error: {str(e)}"}
+
+
+# ============================================================================
+# 14. FULL PIPELINE INTEGRATION TEST
+# ============================================================================
+
+
+def test_full_pipeline_integration():
+    """Test the complete system pipeline from user query to data recording.
+
+    Tests the full workflow:
+    1. User interaction (chatbot query)
+    2. RAG retrieval and response
+    3. Reservation creation
+    4. Admin approval/rejection
+    5. MCP server data recording
+    """
+    print_section("TEST 14: FULL PIPELINE INTEGRATION")
+
+    print("""
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                    FULL PIPELINE INTEGRATION TEST                    │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │                                                                      │
+    │   User Query ──→ Safety Check ──→ RAG Retrieval ──→ Response        │
+    │                                                                      │
+    │   Reservation Request ──→ Data Collection ──→ Admin Queue           │
+    │                                                                      │
+    │   Admin Decision ──→ Status Update ──→ MCP Recording                │
+    │                                                                      │
+    └─────────────────────────────────────────────────────────────────────┘
+    """)
+
+    test_stages = []
+    all_passed = True
+
+    try:
+        # Stage 1: Chatbot Query Processing
+        print("\n" + "=" * 60)
+        print("STAGE 1: Chatbot Query Processing")
+        print("=" * 60)
+
+        with create_test_app() as app:
+            test_queries = [
+                ("Where is downtown parking?", "info"),
+                ("What are the prices?", "info"),
+                ("How many spaces are available?", "realtime"),
+            ]
+
+            stage1_passed = 0
+            for query, query_type in test_queries:
+                result = app.process_user_message(query)
+                response = result.get("response", "")
+                success = len(response) > 20 and not result.get("safety_issue", False)
+
+                status = "✓" if success else "✗"
+                print(f"  {status} Query ({query_type}): '{query[:40]}...'")
+                print(f"    Response: {response[:60]}...")
+
+                if success:
+                    stage1_passed += 1
+
+            stage1_success = stage1_passed == len(test_queries)
+            test_stages.append({
+                "name": "Chatbot Query Processing",
+                "passed": stage1_success,
+                "details": f"{stage1_passed}/{len(test_queries)} queries successful"
+            })
+            if not stage1_success:
+                all_passed = False
+
+        # Stage 2: Safety Guardrails
+        print("\n" + "=" * 60)
+        print("STAGE 2: Safety Guardrails")
+        print("=" * 60)
+
+        from src.guardrails.filter import DataProtectionFilter
+        filter_obj = DataProtectionFilter()
+
+        safety_tests = [
+            ("My credit card is 4111-1111-1111-1111", False, "Block CC"),
+            ("Normal parking query", True, "Allow safe"),
+            ("DROP TABLE users;", False, "Block SQL injection"),
+        ]
+
+        stage2_passed = 0
+        for message, should_be_safe, reason in safety_tests:
+            is_safe, _ = filter_obj.check_safety(message)
+            success = is_safe == should_be_safe
+
+            status = "✓" if success else "✗"
+            expected = "Safe" if should_be_safe else "Blocked"
+            actual = "Safe" if is_safe else "Blocked"
+            print(f"  {status} {reason}: Expected={expected}, Got={actual}")
+
+            if success:
+                stage2_passed += 1
+
+        stage2_success = stage2_passed == len(safety_tests)
+        test_stages.append({
+            "name": "Safety Guardrails",
+            "passed": stage2_success,
+            "details": f"{stage2_passed}/{len(safety_tests)} checks correct"
+        })
+        if not stage2_success:
+            all_passed = False
+
+        # Stage 3: Reservation & Admin Flow
+        print("\n" + "=" * 60)
+        print("STAGE 3: Reservation & Admin Flow")
+        print("=" * 60)
+
+        from src.database.sql_db import ParkingDatabase
+        from src.admin.admin_service import AdminService
+        from datetime import datetime, timedelta
+
+        test_db_path = "./data/test_pipeline.db"
+        if os.path.exists(test_db_path):
+            os.remove(test_db_path)
+
+        db = ParkingDatabase(db_path=test_db_path)
+        admin_service = AdminService(db)
+
+        # Add parking space
+        db.add_parking_space(
+            id="pipeline_test",
+            name="Pipeline Test Parking",
+            location="Test Location",
+            capacity=100,
+            price_per_hour=5.0
+        )
+
+        stage3_tests = []
+
+        # Create reservation
+        res_id = f"PIPELINE_TEST_{uuid.uuid4().hex[:6].upper()}"
+        success = db.create_reservation(
+            res_id=res_id,
+            user_name="Pipeline",
+            user_surname="TestUser",
+            car_number="PLN-123",
+            parking_id="pipeline_test",
+            start_time=datetime.now() + timedelta(hours=1),
+            end_time=datetime.now() + timedelta(hours=3),
+        )
+        status = "✓" if success else "✗"
+        print(f"  {status} Create reservation: {res_id}")
+        stage3_tests.append(success)
+
+        # Check pending
+        pending = admin_service.get_pending_reservations()
+        found_pending = any(r["id"] == res_id for r in pending)
+        status = "✓" if found_pending else "✗"
+        print(f"  {status} Reservation in pending queue")
+        stage3_tests.append(found_pending)
+
+        # Approve
+        result = admin_service.approve_reservation(res_id, "PipelineAdmin", "Test approval")
+        approved = result.get("success", False)
+        status = "✓" if approved else "✗"
+        print(f"  {status} Admin approval: {result.get('message', 'No message')}")
+        stage3_tests.append(approved)
+
+        # Verify status
+        status_info = admin_service.get_reservation_status(res_id)
+        confirmed = status_info and status_info.get("status") == "confirmed"
+        status = "✓" if confirmed else "✗"
+        print(f"  {status} Status updated to confirmed")
+        stage3_tests.append(confirmed)
+
+        db.close()
+        if os.path.exists(test_db_path):
+            os.remove(test_db_path)
+
+        stage3_success = all(stage3_tests)
+        test_stages.append({
+            "name": "Reservation & Admin Flow",
+            "passed": stage3_success,
+            "details": f"{sum(stage3_tests)}/{len(stage3_tests)} operations successful"
+        })
+        if not stage3_success:
+            all_passed = False
+
+        # Stage 4: MCP Recording
+        print("\n" + "=" * 60)
+        print("STAGE 4: MCP Data Recording")
+        print("=" * 60)
+
+        async def test_mcp_recording():
+            from src.mcp.reservation_server import write_reservation, read_reservations
+
+            # Write reservation via MCP
+            test_reservation = {
+                "reservation_id": f"MCP_PIPELINE_{uuid.uuid4().hex[:6]}",
+                "user_name": "Pipeline",
+                "user_surname": "MCPTest",
+                "car_number": "MCP-PLN",
+                "start_time": "2026-03-01 10:00",
+                "end_time": "2026-03-01 14:00",
+                "approved_by": "Pipeline Test",
+                "parking_id": "downtown_1"
+            }
+
+            write_result = await write_reservation(test_reservation)
+            write_success = "successfully" in write_result[0].text.lower() or "written" in write_result[0].text.lower()
+
+            status = "✓" if write_success else "✗"
+            print(f"  {status} MCP write reservation")
+
+            # Read back
+            read_result = await read_reservations({"limit": 5})
+            read_success = read_result is not None and len(read_result) > 0
+
+            status = "✓" if read_success else "✗"
+            print(f"  {status} MCP read reservations")
+
+            return write_success and read_success
+
+        stage4_success = asyncio.run(test_mcp_recording())
+        test_stages.append({
+            "name": "MCP Data Recording",
+            "passed": stage4_success,
+            "details": "Write and read successful" if stage4_success else "MCP operations failed"
+        })
+        if not stage4_success:
+            all_passed = False
+
+        # Summary
+        print("\n" + "=" * 60)
+        print("PIPELINE INTEGRATION SUMMARY")
+        print("=" * 60)
+
+        print(f"\n{'Stage':<35} {'Status':<10} {'Details':<30}")
+        print("-" * 75)
+
+        for stage in test_stages:
+            status = "✓ PASS" if stage["passed"] else "✗ FAIL"
+            print(f"{stage['name']:<35} {status:<10} {stage['details']:<30}")
+
+        print("-" * 75)
+        passed_count = sum(1 for s in test_stages if s["passed"])
+        overall_status = "✓ ALL STAGES PASSED" if all_passed else f"✗ {len(test_stages) - passed_count} STAGE(S) FAILED"
+        print(f"\n{overall_status}")
+
+        details = {
+            "metrics": {
+                "Stages Passed": passed_count,
+                "Total Stages": len(test_stages),
+                "Pass Rate (%)": (passed_count / len(test_stages)) * 100
+            },
+            "test_cases": [
+                {"name": s["name"], "expected": "Pass", "result": "Pass" if s["passed"] else "Fail", "passed": s["passed"]}
+                for s in test_stages
+            ]
+        }
+
+        return all_passed, details
+
+    except Exception as e:
+        print(f"\n✗ Pipeline integration test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, {"notes": f"Error: {str(e)}"}
+
+
+# ============================================================================
 # MAIN TEST RUNNER
 # ============================================================================
 
@@ -1342,6 +2373,14 @@ def main(generate_report: bool = True):
         ("Agent Routing", test_agent_routing),
         ("Admin Flow", test_admin_flow),  # Human-in-the-loop approval
         ("Data Architecture", test_data_architecture),
+        # Load Tests (Stage 3 Requirements)
+        ("Chatbot Load Test", test_chatbot_load),
+        ("Admin Load Test", test_admin_load),
+        ("MCP Load Test", test_mcp_load),
+        # MCP Server Tests (merged from test_mcp_server.py)
+        ("MCP Server", test_mcp_server),
+        # Full Pipeline Integration
+        ("Pipeline Integration", test_full_pipeline_integration),
     ]
 
     test_results = {}

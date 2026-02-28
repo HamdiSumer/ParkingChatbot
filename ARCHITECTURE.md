@@ -854,6 +854,115 @@ Example: `ollama_llama2_7b_test_results_20260227_143022.md`
 
 ---
 
+### 9. **Load Testing & Performance Evaluation**
+
+The system includes comprehensive load tests to evaluate performance under concurrent access:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         LOAD TESTING ARCHITECTURE                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  CHATBOT LOAD TEST (test_chatbot_load)                                      │
+│  ├─ Uses: ThreadPoolExecutor for concurrent user simulation                 │
+│  ├─ Metrics: Success rate, Avg/Min/Max/P95 response time                    │
+│  ├─ Config: NUM_CONCURRENT_USERS=5, QUERIES_PER_USER=3                      │
+│  └─ Pass Criteria: >80% success rate, <30s avg response time                │
+│                                                                             │
+│  ADMIN LOAD TEST (test_admin_load)                                          │
+│  ├─ Uses: ThreadPoolExecutor for concurrent admin operations                │
+│  ├─ Operations: Create, List Pending, Approve, Reject                       │
+│  ├─ Config: NUM_CONCURRENT_ADMINS=5, OPERATIONS_PER_ADMIN=4                 │
+│  └─ Pass Criteria: >80% success rate                                        │
+│                                                                             │
+│  MCP SERVER LOAD TEST (test_mcp_load)                                       │
+│  ├─ Uses: asyncio.gather for concurrent async operations                    │
+│  ├─ Operations: Write reservation, Read reservations, Get file info         │
+│  ├─ Config: NUM_CONCURRENT_WRITERS=5, OPERATIONS_PER_WRITER=4               │
+│  └─ Pass Criteria: >80% success rate                                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Implementation Details**:
+
+```python
+# Chatbot Load Test - Concurrent User Simulation
+def user_session(user_id: int, app) -> List[Dict]:
+    """Simulate a single user's session with multiple queries."""
+    for query_idx in range(QUERIES_PER_USER):
+        result = app.process_user_message(query)
+        # Track: success, response_time_ms, error
+
+# Admin Load Test - Concurrent Admin Operations
+def admin_session(admin_id: int, db, admin_service) -> List[Dict]:
+    """Simulate admin operations: create, list, approve, reject."""
+    # Uses separate test database for isolation
+
+# MCP Load Test - Concurrent Async Operations
+async def mcp_operations(writer_id: int) -> List[Dict]:
+    """Perform concurrent MCP write/read/info operations."""
+    # Uses asyncio.gather for true async concurrency
+```
+
+---
+
+### 10. **Full Pipeline Integration Testing**
+
+Tests the complete system workflow from user query to data recording:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      FULL PIPELINE INTEGRATION TEST                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  STAGE 1: Chatbot Query Processing                                          │
+│  ├─ Tests: info queries, realtime queries                                   │
+│  └─ Validates: RAG retrieval, response generation                           │
+│                                                                             │
+│  STAGE 2: Safety Guardrails                                                 │
+│  ├─ Tests: Block credit cards, Allow safe queries, Block SQL injection      │
+│  └─ Validates: DataProtectionFilter functionality                           │
+│                                                                             │
+│  STAGE 3: Reservation & Admin Flow                                          │
+│  ├─ Tests: Create reservation → Check pending → Approve → Verify status     │
+│  └─ Validates: Database operations, AdminService functionality              │
+│                                                                             │
+│  STAGE 4: MCP Data Recording                                                │
+│  ├─ Tests: Write reservation via MCP → Read back                            │
+│  └─ Validates: MCP server tools, file operations                            │
+│                                                                             │
+│  Data Flow:                                                                 │
+│  User Query → Safety Check → RAG Retrieval → Response                       │
+│       ↓                                                                     │
+│  Reservation Request → Data Collection → Admin Queue                        │
+│       ↓                                                                     │
+│  Admin Decision → Status Update → MCP Recording                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**All 14 Tests in test_rag.py**:
+
+| # | Test Name | Category | Description |
+|---|-----------|----------|-------------|
+| 1 | Guardrails | Security | PII detection, SQL injection prevention |
+| 2 | RAG Metrics | Quality | Faithfulness, relevance, context precision |
+| 3 | Recall@K | Retrieval | Document ranking quality |
+| 4 | Components | System | Initialization verification |
+| 5 | Hybrid Retrieval | Retrieval | Vector DB + SQL Agent |
+| 6 | E2E Workflow | Integration | End-to-end message processing |
+| 7 | Agent Routing | Agent | ReAct tool selection |
+| 8 | Admin Flow | HITL | Approval/rejection workflow |
+| 9 | Data Architecture | System | Static vs dynamic data |
+| 10 | Chatbot Load | Load | Concurrent user simulation |
+| 11 | Admin Load | Load | Concurrent admin operations |
+| 12 | MCP Load | Load | Concurrent MCP operations |
+| 13 | MCP Server | Functional | MCP tool functionality |
+| 14 | Pipeline Integration | E2E | Full system pipeline |
+
+---
+
 ## Part 5b: Admin Dashboard & API Layer
 
 ### Overview
@@ -1026,6 +1135,8 @@ Chatbot                    Dashboard                    File System
 4. **Defense in Depth** - Multiple security layers
 5. **Hot/Cold Separation** - Different databases for different patterns
 6. **Evaluation Framework** - RAGAS metrics for production RAG
+7. **Load Testing** - ThreadPoolExecutor/asyncio for concurrent testing
+8. **Integration Testing** - Full pipeline verification
 
 ---
 
@@ -1045,6 +1156,8 @@ Chatbot                    Dashboard                    File System
 10. **File Export** - Confirmed reservations written to file (MCP-style)
 11. **Evaluation Metrics** - Measure RAG quality scientifically
 12. **Auto-Generated Reports** - Test results saved as markdown reports
+13. **Load Testing** - Concurrent user simulation for chatbot, admin, and MCP server
+14. **Pipeline Integration Testing** - Full end-to-end workflow verification
 
 ### Architecture Principles
 
