@@ -5,15 +5,22 @@ Simple dashboard for administrators to:
 - See reservation details
 - Approve or reject reservations with one click
 - RESUME interrupted conversations (HITL)
+- Write confirmed reservations to file (MCP-style)
+
+Security:
+- API key authentication (optional, enable via REQUIRE_API_KEY=true)
+- Rate limiting to prevent abuse
 """
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from src.database.sql_db import ParkingDatabase
 from src.admin.admin_service import AdminService
+from src.services.reservation_writer import ReservationFileWriter, get_reservation_writer
+from src.api.security import verify_api_key
 from src.utils.logging import logger
 
 # Create router
@@ -23,15 +30,18 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 db: Optional[ParkingDatabase] = None
 admin_service: Optional[AdminService] = None
 hitl_workflow = None  # Will be set if HITL workflow is used
+reservation_writer: Optional[ReservationFileWriter] = None
 
 
 def init_dashboard(database: ParkingDatabase, service: AdminService, workflow=None):
     """Initialize dashboard with database and service instances."""
-    global db, admin_service, hitl_workflow
+    global db, admin_service, hitl_workflow, reservation_writer
     db = database
     admin_service = service
     hitl_workflow = workflow
+    reservation_writer = get_reservation_writer()
     logger.info("Dashboard initialized" + (" with HITL support" if workflow else ""))
+    logger.info(f"Confirmed reservations will be written to: {reservation_writer.get_file_path()}")
 
 
 # ==================== API ENDPOINTS ====================
@@ -73,12 +83,24 @@ async def get_pending_reservations():
 
 
 @router.post("/api/reservations/{reservation_id}/approve")
-async def approve_reservation(reservation_id: str, request: QuickDecisionRequest):
-    """Quick approve a reservation and NOTIFY the waiting chatbot."""
+async def approve_reservation(
+    reservation_id: str,
+    request: QuickDecisionRequest,
+    authenticated: bool = Depends(verify_api_key)
+):
+    """Quick approve a reservation and NOTIFY the waiting chatbot.
+
+    Security: Requires API key when REQUIRE_API_KEY=true
+    """
     if not admin_service:
         raise HTTPException(status_code=500, detail="Service not initialized")
 
-    # First, update the database
+    # Get reservation details BEFORE approving (for file writing)
+    reservation_details = admin_service.get_reservation_details(reservation_id)
+    if not reservation_details:
+        raise HTTPException(status_code=404, detail=f"Reservation {reservation_id} not found")
+
+    # Update the database
     result = admin_service.approve_reservation(
         reservation_id,
         request.admin_name,
@@ -87,6 +109,28 @@ async def approve_reservation(reservation_id: str, request: QuickDecisionRequest
 
     if result["success"]:
         logger.info(f"Dashboard: Approved {reservation_id} by {request.admin_name}")
+
+        # Write confirmed reservation to file
+        file_written = False
+        if reservation_writer:
+            try:
+                write_result = reservation_writer.write_confirmed_reservation(
+                    reservation_id=reservation_id,
+                    user_name=reservation_details["user_name"],
+                    user_surname=reservation_details["user_surname"],
+                    car_number=reservation_details["car_number"],
+                    start_time=reservation_details["start_time"],
+                    end_time=reservation_details["end_time"],
+                    approved_by=request.admin_name,
+                    parking_id=reservation_details["parking_id"],
+                )
+                file_written = write_result["success"]
+                if file_written:
+                    logger.info(f"Wrote reservation {reservation_id} to file")
+                else:
+                    logger.warning(f"Failed to write reservation to file: {write_result['message']}")
+            except Exception as e:
+                logger.warning(f"Could not write reservation to file: {e}")
 
         # If HITL workflow is active, update the thread file so chatbot sees it
         conversation_notified = False
@@ -107,14 +151,22 @@ async def approve_reservation(reservation_id: str, request: QuickDecisionRequest
             "success": True,
             "message": result["message"],
             "conversation_notified": conversation_notified,
+            "file_written": file_written,
         }
     else:
         raise HTTPException(status_code=400, detail=result["message"])
 
 
 @router.post("/api/reservations/{reservation_id}/reject")
-async def reject_reservation(reservation_id: str, request: QuickDecisionRequest):
-    """Quick reject a reservation and NOTIFY the waiting chatbot."""
+async def reject_reservation(
+    reservation_id: str,
+    request: QuickDecisionRequest,
+    authenticated: bool = Depends(verify_api_key)
+):
+    """Quick reject a reservation and NOTIFY the waiting chatbot.
+
+    Security: Requires API key when REQUIRE_API_KEY=true
+    """
     if not admin_service:
         raise HTTPException(status_code=500, detail="Service not initialized")
 

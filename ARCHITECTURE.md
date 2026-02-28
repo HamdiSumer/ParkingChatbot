@@ -798,6 +798,103 @@ Example: `ollama_llama2_7b_test_results_20260227_143022.md`
 
 ---
 
+## Part 5b: Admin Dashboard & API Layer
+
+### Overview
+The Admin Dashboard provides a web-based interface for administrators to manage parking reservations. It runs as a FastAPI server alongside the chatbot.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Admin Dashboard                          │
+│              http://localhost:8000/dashboard/               │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │   Pending    │  │   Approved   │  │   Rejected   │      │
+│  │  Requests    │  │    Today     │  │    Today     │      │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  Reservation Card                                    │   │
+│  │  Name: John Doe | Car: ABC-123 | Parking: Downtown  │   │
+│  │  Time: Feb 28 10:00 - Feb 28 18:00                  │   │
+│  │                                                      │   │
+│  │     [✓ Approve]              [✗ Reject]             │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### API Endpoints
+
+| Endpoint | Method | Description | Auth Required |
+|----------|--------|-------------|---------------|
+| `/dashboard/` | GET | HTML dashboard UI | No |
+| `/dashboard/api/reservations/pending` | GET | List pending reservations | No |
+| `/dashboard/api/reservations/{id}/approve` | POST | Approve a reservation | Yes* |
+| `/dashboard/api/reservations/{id}/reject` | POST | Reject a reservation | Yes* |
+| `/dashboard/api/reservations/history` | GET | Recent activity | No |
+
+*When `REQUIRE_API_KEY=true` in `.env`
+
+### Security Features (src/api/security.py)
+
+**1. API Key Authentication**
+```python
+# Two ways to provide API key:
+# Header: X-API-Key: your-secret-key
+# Query:  ?api_key=your-secret-key
+
+# Uses constant-time comparison to prevent timing attacks
+secrets.compare_digest(provided_key, expected_key)
+```
+
+**2. Rate Limiting**
+```python
+class RateLimiter:
+    max_requests = 100      # Per IP
+    window_seconds = 60     # Time window
+```
+- Prevents abuse and DoS attacks
+- Per-IP tracking
+- Auto-cleanup of old entries
+
+### Reservation File Writer (src/services/reservation_writer.py)
+
+When a reservation is approved, it's written to a text file (MCP-style output):
+
+```
+========================================================
+CONFIRMED PARKING RESERVATIONS
+========================================================
+Name                      | Car Number      | Reservation Period                       | Approval Time        | Admin
+========================================================
+John Doe                  | ABC-123         | 2026-02-28 10:00 to 2026-02-28 18:00    | 2026-02-28 09:30    | Dashboard Admin
+```
+
+**Security Features**:
+- Input sanitization (prevents injection)
+- File locking (thread-safe writes)
+- Append-only mode (no overwrites)
+- Path traversal prevention
+
+### HITL Integration
+
+The dashboard integrates with the Human-in-the-Loop workflow:
+
+```
+Chatbot                    Dashboard                    File System
+   │                          │                             │
+   ├──creates reservation────►│                             │
+   │                          │                             │
+   │                    Admin reviews                       │
+   │                          │                             │
+   │◄────approval sent────────┤                             │
+   │                          ├────write to file───────────►│
+   │                          │                             │
+   ├──notify user─────────────┤                             │
+```
+
+---
+
 ## Part 6: File Responsibility Matrix
 
 | File | Responsibility |
@@ -814,10 +911,14 @@ Example: `ollama_llama2_7b_test_results_20260227_143022.md`
 | `src/guardrails/filter.py` | Input validation + output filtering |
 | `src/agents/workflow.py` | ReAct agent routing via LangGraph state machine |
 | `src/agents/state.py` | Conversation state definition + agent tracking |
-| `src/agents/tools.py` | **NEW**: Tool definitions (VectorSearchTool, SQLQueryTool) |
-| `src/agents/prompts.py` | **NEW**: Agent decision prompts + synthesis prompts |
+| `src/agents/tools.py` | Tool definitions (VectorSearchTool, SQLQueryTool) |
+| `src/agents/prompts.py` | Agent decision prompts + synthesis prompts |
+| `src/api/dashboard.py` | Admin dashboard REST API + HTML web interface |
+| `src/api/security.py` | API key authentication + rate limiting |
+| `src/services/reservation_writer.py` | File export for confirmed reservations (MCP-style) |
 | `test_rag.py` | Comprehensive testing + auto-generated markdown reports |
-| `reports/` | **NEW**: Auto-generated test reports (markdown) |
+| `reports/` | Auto-generated test reports (markdown) |
+| `data/confirmed_reservations/` | Exported reservation records |
 
 ---
 
@@ -827,6 +928,7 @@ Example: `ollama_llama2_7b_test_results_20260227_143022.md`
 - **Python 3.10+** - Language
 - **LangChain** - LLM framework
 - **LangGraph** - Agentic workflows
+- **FastAPI** - Admin Dashboard REST API
 - **Weaviate** - Vector database (Docker)
 - **SQLite** - Relational database
 - **HuggingFace Transformers** - Embeddings
@@ -858,8 +960,11 @@ Example: `ollama_llama2_7b_test_results_20260227_143022.md`
 5. **ReAct Agent Routing** - Intelligent tool selection (only retrieve when needed)
 6. **Hybrid Retrieval** - Vector DB for static + SQL Agent for real-time data
 7. **Human-in-Loop** - Critical decisions get admin approval
-8. **Evaluation Metrics** - Measure RAG quality scientifically
-9. **Auto-Generated Reports** - Test results saved as markdown reports
+8. **Admin Dashboard** - Web UI for reservation management with real-time updates
+9. **API Security** - API key authentication + rate limiting
+10. **File Export** - Confirmed reservations written to file (MCP-style)
+11. **Evaluation Metrics** - Measure RAG quality scientifically
+12. **Auto-Generated Reports** - Test results saved as markdown reports
 
 ### Architecture Principles
 

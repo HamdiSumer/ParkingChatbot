@@ -20,7 +20,12 @@ import os
 import sys
 import time
 import threading
+import warnings
 from datetime import datetime
+
+# Suppress verbose logging and warnings for clean user experience
+os.environ['LOG_LEVEL'] = 'WARNING'
+warnings.filterwarnings('ignore')
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -92,7 +97,16 @@ def main():
     print_banner()
 
     print("Initializing HITL workflow...")
-    workflow = HITLWorkflow()
+
+    # Initialize database and SQL agent for answering questions
+    from src.database.sql_db import ParkingDatabase
+    from src.rag.sql_agent import create_sql_agent
+
+    db = ParkingDatabase()
+    sql_agent = create_sql_agent(db)
+
+    # Create HITL workflow with SQL agent
+    workflow = HITLWorkflow(db=db, sql_agent=sql_agent)
     print("Ready!\n")
 
     thread_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"

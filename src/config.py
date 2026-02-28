@@ -46,6 +46,12 @@ class Config:
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
+    # ========== API Security Configuration ==========
+    # API key for admin dashboard access (set in .env for production)
+    ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "parking-admin-secret-key-2024")
+    # Enable/disable API key requirement (disable for local dev)
+    REQUIRE_API_KEY = os.getenv("REQUIRE_API_KEY", "False").lower() == "true"
+
 
 def get_config() -> Config:
     """Get application configuration."""

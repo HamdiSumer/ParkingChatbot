@@ -74,6 +74,13 @@ ANTHROPIC_MODEL=claude-3-sonnet-20240229
 uv run python main.py
 ```
 
+### 5. Admin Dashboard
+```bash
+uv run uvicorn src.api.server:app --host 0.0.0.0 --port 8001
+```
+
+Access the dashboard from: 0.0.0.0:8001/dashboard
+
 ---
 
 ## Features
@@ -83,6 +90,9 @@ uv run python main.py
 - 📊 **Hybrid Retrieval** - Vector DB (static) + SQL Agent (real-time data)
 - 📋 **Reservations** - Interactive multi-step booking workflow
 - 👤 **Human-in-the-Loop** - Admin approval system
+- 🖥️ **Admin Dashboard** - Web UI for viewing/approving/rejecting reservations
+- 🔐 **API Security** - API key authentication & rate limiting for dashboard
+- 📁 **Reservation Export** - Confirmed reservations written to file (MCP-style)
 - 🔒 **Security** - PII detection and sensitive data filtering
 - 📈 **Evaluation** - Comprehensive RAG metrics (RAGAS framework) + auto-reports
 - 🔄 **Flexible LLMs** - Ollama, OpenAI, Gemini, or Claude
@@ -147,6 +157,11 @@ src/
 │   ├── state.py      # Conversation state + agent tracking
 │   ├── tools.py      # Tool definitions (VectorSearch, SQLQuery)
 │   └── prompts.py    # Agent decision prompts
+├── api/              # REST API & Admin Dashboard
+│   ├── dashboard.py  # Admin web UI + API endpoints
+│   └── security.py   # API key auth, rate limiting
+├── services/         # Background services
+│   └── reservation_writer.py  # File export for confirmed reservations
 ├── guardrails/       # Security, PII detection, data filtering
 ├── evaluation/       # Metrics and evaluation components
 ├── app.py           # Main application logic
@@ -163,6 +178,33 @@ main.py              # Entry point
 
 - **Weaviate Vector DB** - Static parking information (RAG knowledge base)
 - **SQLite** - Dynamic data (availability, prices, reservations, user info)
+- **File Export** - Confirmed reservations saved to `data/confirmed_reservations/`
+
+---
+
+## Admin Dashboard
+
+Access the admin dashboard at `http://localhost:8000/dashboard/` when the server is running.
+
+**Features:**
+- View all pending reservation requests
+- One-click approve/reject with real-time updates
+- Rejection reason modal
+- Recent activity history
+- Auto-refresh every 30 seconds
+
+**API Security (optional):**
+```env
+# In .env
+ADMIN_API_KEY=your-secret-key
+REQUIRE_API_KEY=true
+```
+
+When enabled, approve/reject endpoints require the API key via:
+- Header: `X-API-Key: your-secret-key`
+- Query: `?api_key=your-secret-key`
+
+**Rate Limiting:** 100 requests per minute per IP (prevents abuse).
 
 ---
 
