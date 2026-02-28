@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from src.database.sql_db import ParkingDatabase
 from src.admin.admin_service import AdminService
-from src.services.reservation_writer import ReservationFileWriter, get_reservation_writer
+from src.mcp.reservation_server import write_reservation as mcp_write_reservation
 from src.api.security import verify_api_key
 from src.utils.logging import logger
 
@@ -30,18 +30,16 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 db: Optional[ParkingDatabase] = None
 admin_service: Optional[AdminService] = None
 hitl_workflow = None  # Will be set if HITL workflow is used
-reservation_writer: Optional[ReservationFileWriter] = None
 
 
 def init_dashboard(database: ParkingDatabase, service: AdminService, workflow=None):
     """Initialize dashboard with database and service instances."""
-    global db, admin_service, hitl_workflow, reservation_writer
+    global db, admin_service, hitl_workflow
     db = database
     admin_service = service
     hitl_workflow = workflow
-    reservation_writer = get_reservation_writer()
     logger.info("Dashboard initialized" + (" with HITL support" if workflow else ""))
-    logger.info(f"Confirmed reservations will be written to: {reservation_writer.get_file_path()}")
+    logger.info("Using MCP server for confirmed reservation writes")
 
 
 # ==================== API ENDPOINTS ====================
@@ -110,27 +108,36 @@ async def approve_reservation(
     if result["success"]:
         logger.info(f"Dashboard: Approved {reservation_id} by {request.admin_name}")
 
-        # Write confirmed reservation to file
+        # Write confirmed reservation to file using MCP server
         file_written = False
-        if reservation_writer:
-            try:
-                write_result = reservation_writer.write_confirmed_reservation(
-                    reservation_id=reservation_id,
-                    user_name=reservation_details["user_name"],
-                    user_surname=reservation_details["user_surname"],
-                    car_number=reservation_details["car_number"],
-                    start_time=reservation_details["start_time"],
-                    end_time=reservation_details["end_time"],
-                    approved_by=request.admin_name,
-                    parking_id=reservation_details["parking_id"],
-                )
-                file_written = write_result["success"]
-                if file_written:
-                    logger.info(f"Wrote reservation {reservation_id} to file")
-                else:
-                    logger.warning(f"Failed to write reservation to file: {write_result['message']}")
-            except Exception as e:
-                logger.warning(f"Could not write reservation to file: {e}")
+        try:
+            # Format times for MCP
+            start_time = reservation_details["start_time"]
+            end_time = reservation_details["end_time"]
+            if isinstance(start_time, datetime):
+                start_time = start_time.isoformat()
+            if isinstance(end_time, datetime):
+                end_time = end_time.isoformat()
+
+            mcp_result = await mcp_write_reservation({
+                "reservation_id": reservation_id,
+                "user_name": reservation_details["user_name"],
+                "user_surname": reservation_details["user_surname"],
+                "car_number": reservation_details["car_number"],
+                "start_time": start_time,
+                "end_time": end_time,
+                "approved_by": request.admin_name,
+                "parking_id": reservation_details["parking_id"],
+            })
+            # Check if MCP write was successful
+            mcp_text = mcp_result[0].text if mcp_result else ""
+            file_written = mcp_text.startswith("SUCCESS")
+            if file_written:
+                logger.info(f"MCP: Wrote reservation {reservation_id} to file")
+            else:
+                logger.warning(f"MCP: Failed to write reservation - {mcp_text}")
+        except Exception as e:
+            logger.warning(f"MCP: Could not write reservation to file: {e}")
 
         # If HITL workflow is active, update the thread file so chatbot sees it
         conversation_notified = False

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "parking-reservations": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "src.mcp.reservation_server"],
+      "cwd": "/home/hamdi/Desktop/ai_task",
+      "env": {}
+    }
+  }
+}

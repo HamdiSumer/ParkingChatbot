@@ -383,6 +383,23 @@ vector_store.similarity_search(query, k=3)    # Search by similarity
 - SQL is for **exact queries** (get parking_id = "downtown_1")
 - Vector DB is for **semantic search** (find documents about parking)
 
+**SQL Agent - Reservation-Aware Availability:**
+
+The SQL Agent factors in pending/confirmed reservations when checking availability:
+
+```sql
+-- Example: "How many spaces are available at downtown?"
+SELECT COUNT(*) as available FROM parking_spaces p
+WHERE p.is_open = 1
+AND p.id NOT IN (
+    SELECT r.parking_id FROM reservations r
+    WHERE r.status IN ('pending', 'confirmed')
+    AND r.start_time < 'END_TIME' AND r.end_time > 'START_TIME'
+)
+```
+
+This ensures users see **actual availability** after accounting for reservations.
+
 ---
 
 ### 4. LLM Provider (src/rag/llm_provider.py)
@@ -744,17 +761,56 @@ Output Filtering (Don't leak data):
 
 ---
 
-### 6. **Multi-Step Workflows** (Human-in-the-Loop)
+### 6. **Human-in-the-Loop (HITL) Workflow** (src/agents/hitl_workflow.py)
+
+The HITL workflow uses LangGraph with interrupt support for admin approval:
+
 ```
-Reservation workflow:
-  1. Collect name
-  2. Collect car number
-  3. Collect parking location
-  4. Collect start/end time
-  5. Submit to admin for approval
-  6. Notify user of status
+┌─────────────┐
+│ route_intent│ ← LLM-based classification (not keywords!)
+└──────┬──────┘
+       │
+   ┌───┴───┬─────────────┐
+   ▼       ▼             ▼
+[collect] [general]   [status]
+   │      [chat]      [check]
+   ▼
+┌──────────────────┐
+│collect_reservation│ ← Collects: name, car, parking, times
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│ submit_to_admin  │ ← Creates pending reservation in DB
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│ wait_for_admin   │ ← INTERRUPT (LangGraph pause)
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│process_admin_resp│ ← Resume after approval/rejection
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│    finalize      │
+└──────────────────┘
 ```
-**Production concept**: Not everything should be fully automated
+
+**Key Features:**
+- **LLM-based intent classification** - Uses few-shot prompts, not keyword matching
+- **Field response detection** - Distinguishes "John" (field data) from "What's the price?" (new question)
+- **State persistence** - LangGraph checkpointer preserves conversation across messages
+- **Interrupt support** - Workflow pauses at `wait_for_admin` until dashboard provides decision
+
+**Intent Classification Example:**
+```python
+# These are classified correctly:
+"how many parking spaces left?" → QUESTION (not reservation!)
+"I want to book a spot" → RESERVATION
+"but I made a reservation yesterday" → QUESTION (follow-up, not new booking)
+```
+
+**Production concept**: Not everything should be fully automated - critical decisions need human approval
 
 ---
 
@@ -857,10 +913,18 @@ class RateLimiter:
 - Per-IP tracking
 - Auto-cleanup of old entries
 
-### Reservation File Writer (src/services/reservation_writer.py)
+### MCP Reservation Server (src/mcp/reservation_server.py)
 
-When a reservation is approved, it's written to a text file (MCP-style output):
+The MCP (Model Context Protocol) server enables external AI assistants to interact with reservation files.
 
+**MCP Tools:**
+| Tool | Description |
+|------|-------------|
+| `write_reservation` | Write a confirmed reservation to file |
+| `read_reservations` | Read reservation history (with limit) |
+| `get_reservation_file_info` | Get file path, size, count, last modified |
+
+**Output Format:**
 ```
 ========================================================
 CONFIRMED PARKING RESERVATIONS
@@ -870,11 +934,26 @@ Name                      | Car Number      | Reservation Period                
 John Doe                  | ABC-123         | 2026-02-28 10:00 to 2026-02-28 18:00    | 2026-02-28 09:30    | Dashboard Admin
 ```
 
-**Security Features**:
-- Input sanitization (prevents injection)
-- File locking (thread-safe writes)
-- Append-only mode (no overwrites)
-- Path traversal prevention
+**Security Features:**
+| Feature | Implementation |
+|---------|----------------|
+| Rate Limiting | 60 requests/minute per client (configurable) |
+| API Key Auth | Optional, constant-time comparison (prevents timing attacks) |
+| Input Sanitization | Removes `|`, newlines, null bytes, `..` (path traversal) |
+| File Locking | `fcntl` locks for thread-safe concurrent access |
+| Access Logging | All operations logged to `access_log.txt` with timestamp |
+
+**Configuration:**
+```env
+MCP_REQUIRE_AUTH=true    # Enable API key authentication
+MCP_API_KEY=secret       # The API key
+MCP_RATE_LIMIT=60        # Max requests per minute
+```
+
+**Compatible with:**
+- Claude Desktop (native MCP support)
+- Ollama (via MCP-Ollama bridge)
+- Other MCP-compatible AI assistants
 
 ### HITL Integration
 
@@ -907,15 +986,16 @@ Chatbot                    Dashboard                    File System
 | `src/database/sql_db.py` | Dynamic data storage + exact queries |
 | `src/rag/llm_provider.py` | LLM provider abstraction (Ollama/OpenAI/Gemini/Claude) |
 | `src/rag/retriever.py` | RAG pipeline orchestration + hybrid retrieval |
-| `src/rag/sql_agent.py` | SQL Agent for intelligent database queries |
+| `src/rag/sql_agent.py` | SQL Agent with reservation-aware availability queries |
 | `src/guardrails/filter.py` | Input validation + output filtering |
 | `src/agents/workflow.py` | ReAct agent routing via LangGraph state machine |
+| `src/agents/hitl_workflow.py` | HITL workflow with LLM intent classification + interrupt support |
 | `src/agents/state.py` | Conversation state definition + agent tracking |
 | `src/agents/tools.py` | Tool definitions (VectorSearchTool, SQLQueryTool) |
 | `src/agents/prompts.py` | Agent decision prompts + synthesis prompts |
 | `src/api/dashboard.py` | Admin dashboard REST API + HTML web interface |
 | `src/api/security.py` | API key authentication + rate limiting |
-| `src/services/reservation_writer.py` | File export for confirmed reservations (MCP-style) |
+| `src/mcp/reservation_server.py` | MCP server for reservation file operations |
 | `test_rag.py` | Comprehensive testing + auto-generated markdown reports |
 | `reports/` | Auto-generated test reports (markdown) |
 | `data/confirmed_reservations/` | Exported reservation records |

@@ -87,13 +87,13 @@ Access the dashboard from: 0.0.0.0:8001/dashboard
 
 - 🤖 **Intelligent ReAct Agent** - LLM decides what tools to use (no retrieval for greetings!)
 - 🚗 **Parking Information** - RAG-based document retrieval (vector search)
-- 📊 **Hybrid Retrieval** - Vector DB (static) + SQL Agent (real-time data)
-- 📋 **Reservations** - Interactive multi-step booking workflow
-- 👤 **Human-in-the-Loop** - Admin approval system
+- 📊 **Hybrid Retrieval** - Vector DB (static) + SQL Agent (real-time data with reservation awareness)
+- 📋 **Reservations** - Interactive multi-step booking with LLM-based intent classification
+- 👤 **Human-in-the-Loop (HITL)** - LangGraph workflow with interrupt support for admin approval
 - 🖥️ **Admin Dashboard** - Web UI for viewing/approving/rejecting reservations
 - 🔐 **API Security** - API key authentication & rate limiting for dashboard
-- 📁 **Reservation Export** - Confirmed reservations written to file (MCP-style)
-- 🔒 **Security** - PII detection and sensitive data filtering
+- 🔧 **MCP Server** - Model Context Protocol server for reservation file operations (Claude Desktop/Ollama compatible)
+- 🔒 **Security** - PII detection, input sanitization, access logging, and sensitive data filtering
 - 📈 **Evaluation** - Comprehensive RAG metrics (RAGAS framework) + auto-reports
 - 🔄 **Flexible LLMs** - Ollama, OpenAI, Gemini, or Claude
 
@@ -151,17 +151,20 @@ For detailed testing methodology, metrics explanation, and how tests map to syst
 ```
 src/
 ├── rag/              # RAG pipeline, embeddings, LLM providers, SQL agent
+│   └── sql_agent.py  # SQL Agent with reservation-aware availability queries
 ├── database/         # Weaviate & SQLite storage
-├── agents/           # LangGraph ReAct agent workflow
-│   ├── workflow.py   # Agent-based routing (vector/sql/direct)
+├── agents/           # LangGraph agent workflows
+│   ├── workflow.py   # ReAct agent routing (vector/sql/direct)
+│   ├── hitl_workflow.py  # Human-in-the-Loop workflow with LLM intent classification
 │   ├── state.py      # Conversation state + agent tracking
 │   ├── tools.py      # Tool definitions (VectorSearch, SQLQuery)
 │   └── prompts.py    # Agent decision prompts
+├── admin/            # Admin service for reservation management
 ├── api/              # REST API & Admin Dashboard
 │   ├── dashboard.py  # Admin web UI + API endpoints
 │   └── security.py   # API key auth, rate limiting
-├── services/         # Background services
-│   └── reservation_writer.py  # File export for confirmed reservations
+├── mcp/              # MCP (Model Context Protocol) server
+│   └── reservation_server.py  # MCP tools with security (rate limit, auth, logging)
 ├── guardrails/       # Security, PII detection, data filtering
 ├── evaluation/       # Metrics and evaluation components
 ├── app.py           # Main application logic
@@ -205,6 +208,33 @@ When enabled, approve/reject endpoints require the API key via:
 - Query: `?api_key=your-secret-key`
 
 **Rate Limiting:** 100 requests per minute per IP (prevents abuse).
+
+---
+
+## MCP Server (Model Context Protocol)
+
+The MCP server enables external AI assistants (Claude Desktop, Ollama) to interact with reservation files.
+
+**Tools Available:**
+- `write_reservation` - Write confirmed reservations to file
+- `read_reservations` - Read reservation history
+- `get_reservation_file_info` - Get file metadata
+
+**Security Features:**
+- Rate limiting (60 requests/minute, configurable)
+- API key authentication (optional)
+- Input sanitization
+- File locking for concurrent access
+- Access logging/audit trail
+
+**Configuration:**
+```env
+MCP_REQUIRE_AUTH=true     # Enable API key auth
+MCP_API_KEY=your-key      # Set API key
+MCP_RATE_LIMIT=60         # Max requests per minute
+```
+
+**For Claude Desktop/Ollama:** See `mcp_config.json` for connection settings.
 
 ---
 

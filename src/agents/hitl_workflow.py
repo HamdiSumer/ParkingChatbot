@@ -20,10 +20,85 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt, Command
 from langchain_core.messages import HumanMessage, AIMessage
 
+import re
 from src.database.sql_db import ParkingDatabase
 from src.admin.admin_service import AdminService
 from src.rag.llm_provider import create_llm
 from src.utils.logging import logger
+
+
+def parse_flexible_time(time_str: str, base_date: datetime = None) -> Optional[datetime]:
+    """Parse various time formats into datetime.
+
+    Handles:
+    - "tomorrow", "today"
+    - "13:45", "2pm", "14:00"
+    - "2026-03-01 13:45"
+    - "tomorrow 2pm"
+    """
+    if not time_str:
+        return None
+
+    time_str = time_str.strip().lower()
+    base_date = base_date or datetime.now()
+
+    # Try standard format first
+    try:
+        return datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+    except ValueError:
+        pass
+
+    # Handle relative dates
+    target_date = base_date.date()
+    if "tomorrow" in time_str:
+        from datetime import timedelta
+        target_date = (base_date + timedelta(days=1)).date()
+        time_str = time_str.replace("tomorrow", "").strip()
+    elif "today" in time_str:
+        time_str = time_str.replace("today", "").strip()
+
+    # Extract time component
+    time_patterns = [
+        (r'(\d{1,2}):(\d{2})', lambda m: (int(m.group(1)), int(m.group(2)))),  # 13:45
+        (r'(\d{1,2})\s*(am|pm)', lambda m: (int(m.group(1)) + (12 if m.group(2) == 'pm' and int(m.group(1)) != 12 else 0), 0)),  # 2pm
+        (r'(\d{1,2})h(\d{2})?', lambda m: (int(m.group(1)), int(m.group(2) or 0))),  # 14h00
+    ]
+
+    for pattern, extractor in time_patterns:
+        match = re.search(pattern, time_str)
+        if match:
+            try:
+                hour, minute = extractor(match)
+                return datetime.combine(target_date, datetime.min.time().replace(hour=hour, minute=minute))
+            except (ValueError, AttributeError):
+                continue
+
+    # If only date keywords, use noon as default time
+    if target_date != base_date.date():
+        return datetime.combine(target_date, datetime.min.time().replace(hour=12, minute=0))
+
+    return None
+
+
+def parse_time_range(time_str: str, base_date: datetime = None) -> tuple:
+    """Parse a time range like '13:45 - 17:45' into (start, end) datetimes."""
+    base_date = base_date or datetime.now()
+
+    # Common range separators
+    separators = [' - ', ' to ', '-', '–', 'to', 'until', 'till']
+
+    for sep in separators:
+        if sep in time_str.lower():
+            parts = time_str.lower().split(sep.lower() if sep.lower() in time_str.lower() else sep)
+            if len(parts) == 2:
+                start = parse_flexible_time(parts[0].strip(), base_date)
+                end = parse_flexible_time(parts[1].strip(), base_date)
+
+                # If only times provided (no date), use base_date
+                if start and end:
+                    return start, end
+
+    return None, None
 
 
 # ==================== STATE DEFINITION ====================
@@ -297,56 +372,65 @@ class HITLWorkflow:
         Returns:
             One of: "reservation", "status_check", "question", "general"
         """
-        prompt = f"""Classify this parking chatbot message into exactly ONE category.
+        msg_lower = message.lower()
 
-EXAMPLES:
-- "how many spaces are left" → QUESTION
-- "how many parking spaces are available" → QUESTION
-- "what are the prices" → QUESTION
-- "where is downtown parking" → QUESTION
-- "why is it showing 500" → QUESTION (asking about something)
-- "but I made a reservation" → QUESTION (follow-up question, NOT a new reservation)
-- "that doesn't seem right" → QUESTION
-- "I want to book a spot" → RESERVATION
-- "reserve parking for me" → RESERVATION
-- "I'd like to make a reservation" → RESERVATION
-- "book me a space" → RESERVATION
-- "check my reservation RES_123" → STATUS_CHECK
-- "what's the status of my booking" → STATUS_CHECK
-- "hi" → GENERAL
-- "thanks" → GENERAL
+        # Fast path: Check for explicit reservation keywords first
+        reservation_phrases = [
+            "make a reservation", "make reservation", "book a", "book parking",
+            "reserve a", "reserve parking", "i want to book", "i'd like to book",
+            "i would like to book", "i want to reserve", "i'd like to reserve",
+            "need to book", "need to reserve", "want to park"
+        ]
+        if any(phrase in msg_lower for phrase in reservation_phrases):
+            logger.info("Fast path: detected reservation intent")
+            return "reservation"
 
-KEY RULES:
-1. RESERVATION = User explicitly wants to CREATE a NEW booking (uses "book", "reserve", "I want to park")
-2. QUESTION = Asking about info, follow-up questions, complaints, clarifications
-3. Mentioning "reservation" in context of asking about it is a QUESTION, not RESERVATION
-4. If unsure, choose QUESTION
+        # Fast path: Status check
+        if "status" in msg_lower or ("check" in msg_lower and "reservation" in msg_lower):
+            if "RES_" in message.upper() or "booking" in msg_lower:
+                return "status_check"
+
+        # Fast path: Greetings
+        greetings = ["hi", "hello", "hey", "thanks", "thank you", "bye", "goodbye"]
+        if msg_lower.strip() in greetings or len(msg_lower.split()) <= 2 and any(g in msg_lower for g in greetings):
+            return "general"
+
+        # For ambiguous cases, use LLM
+        prompt = f"""Classify this parking chatbot message. Reply with ONLY one word.
+
+RESERVATION - User wants to CREATE a new booking (book, reserve, park)
+QUESTION - Asking about info, prices, availability, follow-ups
+STATUS - Checking existing reservation status
+GENERAL - Greetings, thanks, chitchat
+
+Examples:
+"how many spaces left" → QUESTION
+"I want to book a spot" → RESERVATION
+"hi I want to make reservation" → RESERVATION
+"check my reservation" → STATUS
+"thanks" → GENERAL
 
 Message: "{message}"
-
-Answer with ONE word only:"""
+Classification:"""
 
         try:
             response = self.llm.invoke(prompt)
             answer = response.content if hasattr(response, "content") else str(response)
-            answer = answer.strip().upper()
+            answer = answer.strip().upper().split()[0] if answer.strip() else ""
 
-            # Extract the intent - check QUESTION first (safer default)
-            if "QUESTION" in answer:
-                return "question"
+            # Map response - check RESERVATION first for this case
+            if "RESERVATION" in answer:
+                return "reservation"
             elif "STATUS" in answer:
                 return "status_check"
-            elif "RESERVATION" in answer:
-                return "reservation"
             elif "GENERAL" in answer:
                 return "general"
             else:
-                # Default to question for ambiguous cases
                 return "question"
 
         except Exception as e:
             logger.error(f"Intent classification failed: {e}")
-            return "question"  # Safer default
+            return "question"
 
     def _is_field_response(self, message: str, expected_field: str) -> bool:
         """Determine if message is providing field data or asking a new question.
@@ -404,34 +488,101 @@ Reply FIELD or QUESTION:"""
         return "general"
 
     def _collect_reservation_node(self, state: HITLState) -> HITLState:
-        """Collect reservation info from user."""
-        # If expecting a field, extract it
-        if state.get("next_expected_field") and state.get("current_message"):
-            field = state["next_expected_field"]
-            value = state["current_message"].strip()
+        """Collect reservation info from user with flexible parsing."""
+        msg = state.get("current_message", "").strip()
+        msg_lower = msg.lower()
 
-            # Store the value
-            if field in ["name", "surname"]:
-                state["reservation_data"][field] = value.title()
-                state["collected_fields"].append(field)
-            elif field == "car_number":
-                state["reservation_data"][field] = value.upper()
-                state["collected_fields"].append(field)
-            elif field == "parking_id":
-                state["reservation_data"][field] = value
-                state["collected_fields"].append(field)
-            elif field in ["start_time", "end_time"]:
-                try:
-                    dt = datetime.strptime(value, "%Y-%m-%d %H:%M")
-                    state["reservation_data"][field] = dt.isoformat()
-                    state["collected_fields"].append(field)
-                except ValueError:
-                    state["chatbot_response"] = "Invalid format. Please use YYYY-MM-DD HH:MM"
-                    return state
+        # Initialize data structures if needed
+        if "reservation_data" not in state or state["reservation_data"] is None:
+            state["reservation_data"] = {}
+        if "collected_fields" not in state or state["collected_fields"] is None:
+            state["collected_fields"] = []
+
+        # Try to extract any data from the current message proactively
+        collected = state.get("collected_fields", [])
+        data = state.get("reservation_data", {})
+
+        # Extract time range if present (e.g., "13:45 - 17:45")
+        if "start_time" not in collected or "end_time" not in collected:
+            start_dt, end_dt = parse_time_range(msg)
+            if start_dt and end_dt:
+                data["start_time"] = start_dt.isoformat()
+                data["end_time"] = end_dt.isoformat()
+                if "start_time" not in collected:
+                    collected.append("start_time")
+                if "end_time" not in collected:
+                    collected.append("end_time")
+                logger.info(f"Extracted time range: {start_dt} to {end_dt}")
+
+        # Extract date mentions (e.g., "tomorrow", "for tomorrow")
+        if "start_time" not in collected:
+            if "tomorrow" in msg_lower or "today" in msg_lower:
+                # Store for later - we still need specific times
+                base_time = parse_flexible_time(msg)
+                if base_time:
+                    data["_temp_date"] = base_time.date().isoformat()
+                    logger.info(f"Stored temp date: {data['_temp_date']}")
+
+        # Extract parking location
+        if "parking_id" not in collected:
+            parking_ids = ["downtown_1", "airport_1", "riverside_1"]
+            for pid in parking_ids:
+                if pid in msg_lower or pid.replace("_", " ") in msg_lower:
+                    data["parking_id"] = pid
+                    collected.append("parking_id")
+                    logger.info(f"Extracted parking_id: {pid}")
+                    break
+            # Also check for location names without _1
+            location_map = {"downtown": "downtown_1", "airport": "airport_1", "riverside": "riverside_1"}
+            for name, pid in location_map.items():
+                if name in msg_lower and "parking_id" not in collected:
+                    data["parking_id"] = pid
+                    collected.append("parking_id")
+                    logger.info(f"Extracted parking_id from name: {pid}")
+                    break
+
+        # If expecting a specific field, try to store the value
+        expected_field = state.get("next_expected_field")
+        if expected_field and msg:
+            if expected_field == "name" and "name" not in collected:
+                # Accept any non-empty input as name
+                data["name"] = msg.split()[0].title()  # Take first word
+                collected.append("name")
+            elif expected_field == "surname" and "surname" not in collected:
+                data["surname"] = msg.split()[0].title()
+                collected.append("surname")
+            elif expected_field == "car_number" and "car_number" not in collected:
+                # Accept alphanumeric input as car number
+                car_num = ''.join(msg.upper().split())
+                if car_num:
+                    data["car_number"] = car_num
+                    collected.append("car_number")
+            elif expected_field == "parking_id" and "parking_id" not in collected:
+                # Already handled above, but accept direct input too
+                data["parking_id"] = msg.strip()
+                collected.append("parking_id")
+            elif expected_field == "start_time" and "start_time" not in collected:
+                # Use flexible parsing
+                temp_date = data.get("_temp_date")
+                base = datetime.fromisoformat(temp_date) if temp_date else datetime.now()
+                dt = parse_flexible_time(msg, base)
+                if dt:
+                    data["start_time"] = dt.isoformat()
+                    collected.append("start_time")
+            elif expected_field == "end_time" and "end_time" not in collected:
+                temp_date = data.get("_temp_date")
+                base = datetime.fromisoformat(temp_date) if temp_date else datetime.now()
+                dt = parse_flexible_time(msg, base)
+                if dt:
+                    data["end_time"] = dt.isoformat()
+                    collected.append("end_time")
+
+        # Update state
+        state["reservation_data"] = data
+        state["collected_fields"] = collected
 
         # Find next missing field
-        required = state.get("required_fields", [])
-        collected = state.get("collected_fields", [])
+        required = state.get("required_fields", ["name", "surname", "car_number", "parking_id", "start_time", "end_time"])
         missing = [f for f in required if f not in collected]
 
         if missing:
@@ -439,17 +590,20 @@ Reply FIELD or QUESTION:"""
             state["next_expected_field"] = next_field
 
             prompts = {
-                "name": "What is your first name?",
-                "surname": "What is your last name?",
-                "car_number": "What is your car registration number?",
-                "parking_id": "Which parking spot? (downtown_1, airport_1, riverside_1)",
-                "start_time": "Start time? (YYYY-MM-DD HH:MM)",
-                "end_time": "End time? (YYYY-MM-DD HH:MM)",
+                "name": "Great! Let's book your parking spot. What's your **first name**?",
+                "surname": "And your **last name**?",
+                "car_number": "What's your **car registration/plate number**?",
+                "parking_id": "Which parking location?\n• **downtown_1** - Downtown Parking\n• **airport_1** - Airport Parking\n• **riverside_1** - Riverside Parking",
+                "start_time": "When do you want to **start**? (e.g., 'tomorrow 2pm' or '2026-03-01 14:00')",
+                "end_time": "And when will you **leave**? (e.g., '5pm' or '17:00')",
             }
-            state["chatbot_response"] = prompts.get(next_field, f"Please provide {next_field}")
+            state["chatbot_response"] = prompts.get(next_field, f"Please provide your {next_field}")
         else:
             # All collected!
             state["next_expected_field"] = None
+            # Clean up temp data
+            if "_temp_date" in data:
+                del data["_temp_date"]
 
         return state
 

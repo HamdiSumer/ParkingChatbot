@@ -1,4 +1,7 @@
-"""Services module for the parking chatbot."""
-from src.services.reservation_writer import ReservationFileWriter
+"""Services module for the parking chatbot.
 
-__all__ = ["ReservationFileWriter"]
+Note: Reservation file writing is now handled by the MCP server.
+See src/mcp/reservation_server.py
+"""
+
+__all__ = []
