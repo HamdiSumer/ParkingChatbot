@@ -44,8 +44,12 @@ async def lifespan(app: FastAPI):
     admin_service = AdminService(db)
     notification_service = NotificationService()
 
-    # Initialize HITL workflow (shared with chatbot via file-based thread store)
-    hitl_workflow = HITLWorkflow(db=db)
+    # Create SQL agent for answering data questions
+    from src.rag.sql_agent import create_sql_agent
+    sql_agent = create_sql_agent(db)
+
+    # Initialize HITL workflow with SQL agent for handling questions
+    hitl_workflow = HITLWorkflow(db=db, sql_agent=sql_agent)
 
     # Initialize dashboard with HITL support
     init_dashboard(db, admin_service, hitl_workflow)

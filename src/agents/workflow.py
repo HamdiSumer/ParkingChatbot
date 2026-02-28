@@ -178,11 +178,21 @@ class ParkingChatbotWorkflow:
         """ReAct agent decision node - decides what action to take."""
         logger.info(f"Agent deciding action for: {state.current_message[:50]}...")
 
-        # IMPORTANT: If we're in an ongoing reservation flow, continue collecting data
+        # If we're in an ongoing reservation flow, ask the agent if this is field data or a new question
         if state.conversation_type == "reservation" and state.next_expected_field:
-            logger.info(f"Continuing reservation flow, expecting: {state.next_expected_field}")
-            state.agent_decision = "start_reservation"
-            return state
+            logger.info(f"In reservation flow, checking if '{state.current_message[:50]}' is field data for '{state.next_expected_field}'")
+            is_field = self._is_reservation_field_response(state)
+            logger.info(f"LLM field check result: {'FIELD' if is_field else 'QUESTION'}")
+            if is_field:
+                logger.info(f"Continuing reservation flow, expecting: {state.next_expected_field}")
+                state.agent_decision = "start_reservation"
+                return state
+            else:
+                # User is asking a new question - break out of reservation flow
+                logger.info("Agent detected new question during reservation flow, breaking out")
+                state.conversation_type = "general"
+                state.next_expected_field = None
+                # Continue to normal agent decision below
 
         # If we're in status check mode (user was asked to provide identification)
         if state.conversation_type == "status_check":
@@ -768,6 +778,47 @@ class ParkingChatbotWorkflow:
         return "ready" if not missing else "collecting"
 
     # ==================== HELPERS ====================
+
+    def _is_reservation_field_response(self, state: ConversationState) -> bool:
+        """Use LLM to determine if user message is a field response or a new question.
+
+        Args:
+            state: Current conversation state with expected field info.
+
+        Returns:
+            True if the message appears to be providing the expected field data.
+            False if it looks like a new question or different intent.
+        """
+        prompt = f"""You are analyzing a conversation where the user is in the middle of making a parking reservation.
+
+The system just asked for: {state.next_expected_field}
+The user responded with: "{state.current_message}"
+
+Is the user's message providing the requested information ({state.next_expected_field}), or are they asking a new/different question?
+
+Reply with ONLY one word:
+- "FIELD" if they are providing the requested {state.next_expected_field}
+- "QUESTION" if they are asking a new question or changing topic
+
+Your answer:"""
+
+        try:
+            response = self.llm.invoke(prompt)
+            if hasattr(response, "content"):
+                answer = response.content.strip().upper()
+            else:
+                answer = str(response).strip().upper()
+
+            # Clean any thinking tags
+            answer = self._clean_response(answer).upper()
+
+            logger.info(f"Field check for '{state.current_message[:30]}...' -> {answer}")
+            return "FIELD" in answer
+
+        except Exception as e:
+            logger.error(f"Field check failed: {e}")
+            # Default: if it ends with ? it's probably a question
+            return not state.current_message.strip().endswith("?")
 
     def _clean_response(self, response: str) -> str:
         """Remove thinking tags from reasoning model outputs."""

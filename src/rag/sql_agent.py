@@ -63,15 +63,33 @@ Database Schema:
 
 User Question: {question}
 
+IMPORTANT RULES FOR AVAILABILITY QUERIES:
+1. When checking "how many spaces available/left", you MUST consider the reservations table
+2. A space is NOT available if there's a pending/confirmed reservation overlapping the requested time
+3. If NO specific time is mentioned, check for current availability (reservations active now)
+4. If NO specific location is mentioned, show availability per location
+
+AVAILABILITY QUERY PATTERN:
+To check available spaces at a location for a time range:
+SELECT COUNT(*) as available FROM parking_spaces p
+WHERE p.is_open = 1
+AND p.id NOT IN (
+    SELECT r.parking_id FROM reservations r
+    WHERE r.status IN ('pending', 'confirmed')
+    AND r.start_time < 'END_TIME' AND r.end_time > 'START_TIME'
+)
+
 Instructions:
 1. Generate ONE SQL SELECT query that helps answer the question
 2. Do NOT include explanations or comments
 3. Output ONLY the SQL query on a single line
-4. If no query is helpful, output: SKIP
+4. For availability questions, use the pattern above to exclude reserved spaces
+5. If no query is helpful, output: SKIP
 
 Example outputs:
-- SELECT * FROM parking_spaces WHERE id='downtown_1'
-- SELECT COUNT(*) as count FROM parking_spaces WHERE is_open=1
+- SELECT p.id, p.name FROM parking_spaces p WHERE p.is_open=1 AND p.id NOT IN (SELECT parking_id FROM reservations WHERE status IN ('pending','confirmed'))
+- SELECT COUNT(*) FROM parking_spaces WHERE is_open=1 AND id NOT IN (SELECT parking_id FROM reservations WHERE status='confirmed')
+- SELECT * FROM reservations WHERE status='pending'
 - SKIP
 
 Now generate your SQL query:""",

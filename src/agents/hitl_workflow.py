@@ -162,10 +162,11 @@ class HITLWorkflow:
     7. Bot says "Great news! Approved!" or "Sorry, rejected."
     """
 
-    def __init__(self, db: ParkingDatabase = None):
+    def __init__(self, db: ParkingDatabase = None, sql_agent=None):
         self.db = db or ParkingDatabase()
         self.admin_service = AdminService(self.db)
         self.llm = create_llm(temperature=0.3)
+        self.sql_agent = sql_agent  # For answering data questions
         self.thread_store = ThreadStore()
 
         # Checkpointer for thread persistence
@@ -256,20 +257,27 @@ class HITLWorkflow:
     # ==================== NODES ====================
 
     def _route_intent_node(self, state: HITLState) -> HITLState:
-        """Determine user intent."""
-        msg = state.get("current_message", "").lower()
+        """Determine user intent using LLM agent."""
+        msg = state.get("current_message", "")
 
-        # If already in reservation flow, continue
+        # If already in reservation flow, check if user is providing field data or asking a new question
         if state.get("conversation_type") == "reservation" and state.get("next_expected_field"):
-            return state
+            if self._is_field_response(msg, state.get("next_expected_field")):
+                return state  # Continue reservation flow
+            else:
+                # User is asking a new question - break out of reservation
+                logger.info("Agent detected new question during reservation flow, breaking out")
+                state["conversation_type"] = "general"
+                state["next_expected_field"] = None
+                # Fall through to re-classify intent
 
-        # Check for status check
-        if any(kw in msg for kw in ["status", "check", "my reservation", "res_"]):
+        # Use LLM to classify intent
+        intent = self._classify_intent(msg)
+        logger.info(f"Agent classified intent as: {intent}")
+
+        if intent == "status_check":
             state["conversation_type"] = "status_check"
-            return state
-
-        # Check for reservation intent
-        if any(kw in msg for kw in ["book", "reserve", "reservation", "parking"]):
+        elif intent == "reservation":
             state["conversation_type"] = "reservation"
             if not state.get("collected_fields"):
                 state["collected_fields"] = []
@@ -277,11 +285,114 @@ class HITLWorkflow:
                 state["required_fields"] = ["name", "surname", "car_number", "parking_id", "start_time", "end_time"]
             if not state.get("reservation_data"):
                 state["reservation_data"] = {}
-            return state
+        else:
+            # "question" or "general" - handle as general chat
+            state["conversation_type"] = "general"
 
-        # Default to general
-        state["conversation_type"] = "general"
         return state
+
+    def _classify_intent(self, message: str) -> str:
+        """Use LLM to classify user intent.
+
+        Returns:
+            One of: "reservation", "status_check", "question", "general"
+        """
+        prompt = f"""Classify this parking chatbot message into exactly ONE category.
+
+EXAMPLES:
+- "how many spaces are left" → QUESTION
+- "how many parking spaces are available" → QUESTION
+- "what are the prices" → QUESTION
+- "where is downtown parking" → QUESTION
+- "why is it showing 500" → QUESTION (asking about something)
+- "but I made a reservation" → QUESTION (follow-up question, NOT a new reservation)
+- "that doesn't seem right" → QUESTION
+- "I want to book a spot" → RESERVATION
+- "reserve parking for me" → RESERVATION
+- "I'd like to make a reservation" → RESERVATION
+- "book me a space" → RESERVATION
+- "check my reservation RES_123" → STATUS_CHECK
+- "what's the status of my booking" → STATUS_CHECK
+- "hi" → GENERAL
+- "thanks" → GENERAL
+
+KEY RULES:
+1. RESERVATION = User explicitly wants to CREATE a NEW booking (uses "book", "reserve", "I want to park")
+2. QUESTION = Asking about info, follow-up questions, complaints, clarifications
+3. Mentioning "reservation" in context of asking about it is a QUESTION, not RESERVATION
+4. If unsure, choose QUESTION
+
+Message: "{message}"
+
+Answer with ONE word only:"""
+
+        try:
+            response = self.llm.invoke(prompt)
+            answer = response.content if hasattr(response, "content") else str(response)
+            answer = answer.strip().upper()
+
+            # Extract the intent - check QUESTION first (safer default)
+            if "QUESTION" in answer:
+                return "question"
+            elif "STATUS" in answer:
+                return "status_check"
+            elif "RESERVATION" in answer:
+                return "reservation"
+            elif "GENERAL" in answer:
+                return "general"
+            else:
+                # Default to question for ambiguous cases
+                return "question"
+
+        except Exception as e:
+            logger.error(f"Intent classification failed: {e}")
+            return "question"  # Safer default
+
+    def _is_field_response(self, message: str, expected_field: str) -> bool:
+        """Determine if message is providing field data or asking a new question.
+
+        Uses simple heuristics first, then LLM as fallback for ambiguous cases.
+        """
+        msg = message.strip()
+        msg_lower = msg.lower()
+
+        # Short inputs (1-3 words) without question marks are almost always field data
+        word_count = len(msg.split())
+        if word_count <= 3 and not msg.endswith("?"):
+            # Check it's not a clear command/question
+            question_starters = ["how", "what", "where", "when", "why", "can", "is", "are", "do", "does"]
+            if not any(msg_lower.startswith(q) for q in question_starters):
+                return True  # It's field data
+
+        # Clear questions - break out of reservation
+        if msg.endswith("?"):
+            return False
+
+        # Question patterns - break out
+        question_patterns = [
+            "how many", "how much", "what is", "what are", "where is",
+            "tell me", "show me", "i want to know", "can you"
+        ]
+        if any(pattern in msg_lower for pattern in question_patterns):
+            return False
+
+        # For longer inputs, use LLM to decide
+        if word_count > 3:
+            prompt = f"""Is this user input providing their {expected_field}, or asking a different question?
+
+Input: "{message}"
+Expected field: {expected_field}
+
+Reply FIELD or QUESTION:"""
+            try:
+                response = self.llm.invoke(prompt)
+                answer = response.content if hasattr(response, "content") else str(response)
+                return "FIELD" in answer.upper()
+            except Exception as e:
+                logger.error(f"Field check failed: {e}")
+
+        # Default: assume it's field data if not clearly a question
+        return True
 
     def _intent_router(self, state: HITLState) -> str:
         """Route based on conversation type."""
@@ -352,11 +463,79 @@ class HITLWorkflow:
         return "continue"
 
     def _general_chat_node(self, state: HITLState) -> HITLState:
-        """Handle general conversation."""
+        """Handle general conversation and questions using SQL agent."""
+        msg = state.get("current_message", "")
+        msg_lower = msg.lower()
+
+        # Check if this is an availability question
+        is_availability_question = any(kw in msg_lower for kw in [
+            "how many", "available", "spaces left", "spots left", "spaces available"
+        ])
+
+        if is_availability_question:
+            # Check if query is vague (missing location or time)
+            has_location = any(loc in msg_lower for loc in ["downtown", "airport", "riverside"])
+            has_time = any(time_word in msg_lower for time_word in [
+                "today", "tomorrow", "morning", "afternoon", "evening", "now",
+                ":", "am", "pm", "hour"
+            ]) or any(char.isdigit() for char in msg)
+
+            # If vague, ask for clarification
+            if not has_location and not has_time:
+                state["chatbot_response"] = (
+                    "To check availability accurately, I need a bit more info:\n\n"
+                    "**Which location?**\n"
+                    "• downtown_1 - Downtown Parking\n"
+                    "• airport_1 - Airport Parking\n"
+                    "• riverside_1 - Riverside Parking\n\n"
+                    "**When do you need parking?**\n"
+                    "For example: 'tomorrow 2pm to 5pm' or 'now'\n\n"
+                    "Or I can show you current overall availability if you just want a quick overview!"
+                )
+                return state
+
+        # For data questions - query the database
+        if state.get("conversation_type") == "general":
+            is_data_question = any(kw in msg_lower for kw in [
+                "how many", "available", "price", "cost", "open", "spaces", "left",
+                "show", "list", "overview"
+            ])
+
+            if is_data_question and self.sql_agent:
+                try:
+                    result = self.sql_agent.invoke({"input": msg})
+                    sql_output = result.get("output", "")
+
+                    if sql_output:
+                        # Synthesize a natural response - MUST use the exact data
+                        synthesis_prompt = f"""Convert this database result into a friendly response.
+
+User question: "{msg}"
+Database result: {sql_output}
+
+IMPORTANT: Use the EXACT numbers from the database result. Do NOT make up any numbers.
+If the result shows 3 spaces, say 3. If it shows 0, say 0.
+Mention that availability may change based on reservations if relevant.
+
+Give a brief, friendly 1-2 sentence response using the actual data:"""
+
+                        response = self.llm.invoke(synthesis_prompt)
+                        answer = response.content if hasattr(response, "content") else str(response)
+                        # Remove quotes if present
+                        answer = answer.strip().strip('"').strip("'")
+                        state["chatbot_response"] = answer
+                        return state
+
+                except Exception as e:
+                    logger.error(f"SQL agent query failed: {e}")
+
+        # Fallback to general LLM response (for non-data questions)
         response = self.llm.invoke(
-            f"You are a parking assistant. Respond briefly: {state['current_message']}"
+            f"You are a helpful parking assistant. The user said: '{msg}'. "
+            f"Give a brief, helpful response. Do NOT make up any numbers or data."
         )
-        state["chatbot_response"] = response.content if hasattr(response, "content") else str(response)
+        answer = response.content if hasattr(response, "content") else str(response)
+        state["chatbot_response"] = answer.strip().strip('"').strip("'")
         return state
 
     def _check_status_node(self, state: HITLState) -> HITLState:
@@ -497,14 +676,23 @@ class HITLWorkflow:
             Dict with response and metadata
         """
         thread_id = thread_id or str(uuid.uuid4())
+        config = {"configurable": {"thread_id": thread_id}}
 
-        # Get or create state
-        if thread_id in self._conversations:
-            state = self._conversations[thread_id]
+        # Check if there's existing state in the checkpointer
+        existing_state = self.graph.get_state(config)
+
+        if existing_state.values:
+            # Continue existing conversation - only pass new input
+            input_data = {
+                "current_message": message,
+                "thread_id": thread_id,
+                "chatbot_response": "",  # Reset for new turn
+            }
         else:
-            state = HITLState(
+            # New conversation - initialize full state
+            input_data = HITLState(
                 messages=[],
-                current_message="",
+                current_message=message,
                 thread_id=thread_id,
                 conversation_type="general",
                 waiting_for_admin=False,
@@ -519,15 +707,9 @@ class HITLWorkflow:
                 chatbot_response="",
             )
 
-        state["current_message"] = message
-        state["thread_id"] = thread_id
-
-        # Run the graph
-        config = {"configurable": {"thread_id": thread_id}}
-
         try:
             # This will run until an interrupt or END
-            result = self.graph.invoke(state, config)
+            result = self.graph.invoke(input_data, config)
 
             # Check if we hit an interrupt (waiting for admin)
             graph_state = self.graph.get_state(config)
@@ -535,9 +717,6 @@ class HITLWorkflow:
             if graph_state.next:  # There are pending nodes = we're interrupted
                 # Graph is paused at wait_for_admin
                 logger.info(f"Graph interrupted at: {graph_state.next}")
-
-                # Update conversation state
-                self._conversations[thread_id] = result
 
                 return {
                     "response": result.get("chatbot_response", ""),
@@ -549,8 +728,6 @@ class HITLWorkflow:
                 }
 
             # Normal completion
-            self._conversations[thread_id] = result
-
             return {
                 "response": result.get("chatbot_response", ""),
                 "thread_id": thread_id,
@@ -612,9 +789,6 @@ class HITLWorkflow:
         # Resume the graph (continue from interrupt)
         result = self.graph.invoke(None, config)
 
-        # Update conversation state
-        self._conversations[thread_id] = result
-
         logger.info(f"Resumed conversation for {reservation_id} after {decision}")
 
         return {
@@ -631,11 +805,29 @@ class HITLWorkflow:
 
     def is_waiting_for_admin(self, thread_id: str) -> bool:
         """Check if a thread is waiting for admin."""
-        state = self._conversations.get(thread_id, {})
-        return state.get("waiting_for_admin", False)
+        config = {"configurable": {"thread_id": thread_id}}
+        graph_state = self.graph.get_state(config)
+        if graph_state.values:
+            return graph_state.values.get("waiting_for_admin", False)
+        return False
 
     def reset_conversation(self, thread_id: str):
-        """Reset a conversation."""
-        if thread_id in self._conversations:
-            del self._conversations[thread_id]
+        """Reset a conversation by clearing checkpointer state."""
+        # Clear from checkpointer by updating with empty state
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            # Update state to reset all fields
+            self.graph.update_state(
+                config,
+                {
+                    "conversation_type": "general",
+                    "collected_fields": [],
+                    "reservation_data": {},
+                    "next_expected_field": None,
+                    "waiting_for_admin": False,
+                    "reservation_id": None,
+                }
+            )
+        except Exception:
+            pass  # Thread might not exist yet
         logger.info(f"Conversation {thread_id} reset")

@@ -74,6 +74,13 @@ ANTHROPIC_MODEL=claude-3-sonnet-20240229
 uv run python main.py
 ```
 
+### 5. Admin Dashboard
+```bash
+uv run uvicorn src.api.server:app --host 0.0.0.0 --port 8001
+```
+
+Access the dashboard from: 0.0.0.0:8001/dashboard
+
 ---
 
 ## Features
